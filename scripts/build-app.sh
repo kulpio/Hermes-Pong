@@ -42,6 +42,11 @@ cp "$ROOT/resources/bolt-active-dim.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-active-bright.png" "$RES/" 2>/dev/null || true
 cp "$SRC_PY" "$RES/hermes_pairing.py"
 chmod 644 "$RES/hermes_pairing.py"
+# Bundle bridge so Send to Claude works without relying only on ~/bin
+if [[ -f "$ROOT/scripts/claude-delegate.py" ]]; then
+  cp "$ROOT/scripts/claude-delegate.py" "$RES/claude-delegate.py"
+  chmod 755 "$RES/claude-delegate.py"
+fi
 echo "$ROOT" > "$RES/project_root"
 
 # Nested Panel.app (accessory — no second Dock icon)
@@ -51,6 +56,7 @@ PANEL_MACOS="$PANEL_CONTENTS/MacOS"
 PANEL_RES="$PANEL_CONTENTS/Resources"
 mkdir -p "$PANEL_MACOS" "$PANEL_RES"
 cp "$RES/hermes_pairing.py" "$PANEL_RES/"
+cp "$RES/claude-delegate.py" "$PANEL_RES/" 2>/dev/null || true
 cp "$RES/AppIcon.icns" "$PANEL_RES/" 2>/dev/null || true
 cp "$RES/AppIcon-1024.png" "$PANEL_RES/" 2>/dev/null || true
 cp "$RES/pair-illustration.png" "$PANEL_RES/" 2>/dev/null || true

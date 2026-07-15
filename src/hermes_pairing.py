@@ -58,7 +58,7 @@ HERE = Path(__file__).resolve().parent
 ICON = HERE / "AppIcon-1024.png"
 ILLU = HERE / "pair-illustration.png"
 
-W, H = 460, 680
+W, H = 460, 780
 PAD = 28
 GUIDE_W, GUIDE_H = 340, 160
 
@@ -443,17 +443,15 @@ def show_pair_persist_tip(pair_name: str = "") -> None:
     alert.setMessageText_("Pair stays connected")
     alert.setInformativeText_(
         f"“{label}” stays linked until you hit Kill — even if you quit Hermes Pong.\n\n"
-        "How Hermes talks to Claude (important):\n"
-        "Hermes must run the bridge — chatting in Hermes alone does not appear in Claude.\n\n"
-        "  claude-delegate.py 'your task here'\n\n"
-        "That paste+Enter’s into the Claude window so you see the work there.\n"
-        "Reply mirror: cat ~/.hermes-pong/last-claude.txt"
+        "Send work to Claude from this app:\n"
+        "Control panel → “Send to Claude” (or the menu bar bolt → Send to Claude).\n\n"
+        "That pastes into the Claude window and presses Enter so you see it work.\n"
+        "Reply mirror: ~/.hermes-pong/last-claude.txt"
     )
     alert.addButtonWithTitle_("Got it")
     alert.addButtonWithTitle_("Don't remind me")
-    alert.setAlertStyle_(0)  # informational
+    alert.setAlertStyle_(0)
     resp = alert.runModal()
-    # Second button
     if resp == NSAlertFirstButtonReturn + 1:
         try:
             flag.parent.mkdir(parents=True, exist_ok=True)
@@ -461,6 +459,49 @@ def show_pair_persist_tip(pair_name: str = "") -> None:
             log("dont-remind-pair-persist set")
         except Exception as e:
             log(f"dont-remind write fail: {e}")
+
+
+def send_to_claude(prompt: str, no_wait: bool = True) -> tuple[bool, str]:
+    """
+    Run the bridge from inside the app (no terminal bash needed).
+    Returns (ok, message).
+    """
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return False, "Type a task first."
+
+    candidates = [
+        Path.home() / "bin" / "claude-delegate.py",
+        Path("/Users/dylandemnard/DigitalBrain/Boreal/tools/hermes-claude-app/scripts/claude-delegate.py"),
+        Path(__file__).resolve().parent.parent / "scripts" / "claude-delegate.py",
+        Path(__file__).resolve().parent / "claude-delegate.py",
+        Path("/Applications/HermesPong.app/Contents/Resources/claude-delegate.py"),
+        Path("/Applications/HermesPong.app/Contents/Resources/Panel.app/Contents/Resources/claude-delegate.py"),
+    ]
+    bridge = next((p for p in candidates if p.exists()), None)
+    if not bridge:
+        return False, "Bridge script missing (claude-delegate.py)."
+
+    py = Path("/Users/dylandemnard/DigitalBrain/Boreal/tools/hermes-claude-app/venv/bin/python")
+    if not py.exists():
+        py = Path("/usr/bin/python3")
+
+    cmd = [str(py), str(bridge)]
+    if no_wait:
+        cmd.append("--no-wait")
+    cmd.append(prompt)
+    log(f"send_to_claude cmd={cmd!r}")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120 if no_wait else 620)
+        out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+        log(f"send_to_claude rc={r.returncode} out={out[:500]!r}")
+        if r.returncode != 0:
+            return False, out or f"Bridge failed (exit {r.returncode})"
+        return True, out or "Sent to Claude — watch the Claude window."
+    except subprocess.TimeoutExpired:
+        return False, "Bridge timed out."
+    except Exception as e:
+        return False, str(e)
 
 
 def _front_terminal_frame_cocoa():
@@ -888,6 +929,8 @@ class AppDelegate(NSObject):
     listContainer = None
     pair_buttons = None
     guide = None
+    taskField = None
+    sendStatus = None
 
     def applicationDidFinishLaunching_(self, notification):
         log("applicationDidFinishLaunching Hermes Pong panel")
@@ -1007,11 +1050,36 @@ class AppDelegate(NSObject):
 
         y -= 40
         content.addSubview_(
+            lbl("SEND TO CLAUDE", NSMakeRect(PAD, y, W - 2 * PAD, 16), size=11, secondary=True)
+        )
+        y -= 36
+        self.taskField = NSTextField.alloc().initWithFrame_(NSMakeRect(PAD, y, W - 2 * PAD, 30))
+        self.taskField.setPlaceholderString_("Task for Claude…")
+        try:
+            self.taskField.setBezeled_(True)
+        except Exception:
+            pass
+        content.addSubview_(self.taskField)
+        y -= 42
+        content.addSubview_(
+            btn("Send to Claude", "sendToClaude:", NSMakeRect(PAD, y, W - 2 * PAD, 38), self)
+        )
+        y -= 22
+        self.sendStatus = lbl(
+            "Pastes into the Claude window and presses Enter.",
+            NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 18),
+            size=11,
+            secondary=True,
+        )
+        content.addSubview_(self.sendStatus)
+
+        y -= 36
+        content.addSubview_(
             lbl("ACTIVE PAIRS", NSMakeRect(PAD, y, W - 2 * PAD, 16), size=11, secondary=True)
         )
 
-        y -= 200
-        self.listContainer = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, W - 2 * PAD, 190))
+        y -= 160
+        self.listContainer = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, W - 2 * PAD, 150))
         content.addSubview_(self.listContainer)
 
         half = (W - 2 * PAD - 12) / 2
@@ -1030,10 +1098,10 @@ class AppDelegate(NSObject):
         pairs = list_pairs()
         if not pairs:
             self.listContainer.addSubview_(
-                lbl("No pairs yet — use New pair.", NSMakeRect(0, 150, W - 2 * PAD, 20), size=12, secondary=True)
+                lbl("No pairs yet — use New pair.", NSMakeRect(0, 110, W - 2 * PAD, 20), size=12, secondary=True)
             )
             return
-        y = 150
+        y = 110
         for name in pairs:
             row = NSView.alloc().initWithFrame_(NSMakeRect(0, y - 8, W - 2 * PAD, 44))
             row.addSubview_(lbl(f"●  {name}", NSMakeRect(0, 12, 200, 20), bold=True, size=13))
@@ -1046,6 +1114,37 @@ class AppDelegate(NSObject):
             self.listContainer.addSubview_(row)
             self.pair_buttons.append((b1, b2, name))
             y -= 48
+
+    def sendToClaude_(self, sender):
+        text = ""
+        if self.taskField:
+            text = str(self.taskField.stringValue() or "")
+        if self.sendStatus:
+            self.sendStatus.setStringValue_("Sending… watch Claude window")
+
+        def work():
+            ok, msg = send_to_claude(text, no_wait=True)
+            # short status on main
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "sendDone:", f"{'OK' if ok else 'ERR'}|{msg[:180]}", False
+            )
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def sendDone_(self, payload):
+        s = str(payload or "")
+        if "|" in s:
+            kind, msg = s.split("|", 1)
+        else:
+            kind, msg = "OK", s
+        if self.sendStatus:
+            self.sendStatus.setStringValue_(
+                ("✓ " if kind == "OK" else "✗ ") + msg
+            )
+        if kind == "OK" and self.taskField:
+            # keep text so user can resend; optional clear — leave it
+            pass
+        log(f"sendDone {kind}: {msg}")
 
     def startFresh_(self, sender):
         def work():
