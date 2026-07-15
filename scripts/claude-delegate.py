@@ -108,6 +108,9 @@ def save_reply(text: str) -> None:
 
 
 def send_via_tmux(target: str, prompt: str) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    (STATE_DIR / "last-sent.txt").write_text(prompt)
+
     run_ok(["tmux", "select-window", "-t", target])
     flash_tmux(target, "⚡ Hermes Pong: submitting task (paste + Enter)…")
     time.sleep(0.05)
@@ -120,12 +123,16 @@ def send_via_tmux(target: str, prompt: str) -> None:
         run_ok(["tmux", "paste-buffer", "-t", target, "-d"])
 
     time.sleep(0.2)
-    # Must submit — unsent text in the input is useless
     run_ok(["tmux", "send-keys", "-t", target, "Enter"])
     time.sleep(0.05)
     run_ok(["tmux", "send-keys", "-t", target, "C-m"])
-    flash_tmux(target, "⚡ Hermes Pong: Enter sent — watch Claude work here")
+    flash_tmux(target, "⚡ Hermes Pong: Enter sent — watch Claude window")
     print(f"[bridge] tmux submit → {target} ({len(prompt)} chars) + Enter")
+    # Nudge Claude view session so the Claude Terminal is on window 1
+    state = load_state()
+    vc = state.get("view_claude")
+    if vc:
+        run_ok(["tmux", "select-window", "-t", f"{vc}:1"])
 
 
 def send_via_terminal_window(window_id: str, prompt: str) -> None:

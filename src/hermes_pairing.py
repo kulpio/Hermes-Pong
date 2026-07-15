@@ -155,9 +155,12 @@ end tell
 def list_pairs() -> list[str]:
     out = sh("tmux list-sessions -F '#{session_name}' 2>/dev/null || true")
     names = []
-    for s in out.splitlines():
-        s = s.strip()
+    for line in out.splitlines():
+        s = line.strip()
         if not s:
+            continue
+        # Hide view sessions (name-h / name-c); only list base pairs
+        if s.endswith("-h") or s.endswith("-c"):
             continue
         if s == "hermes-claude" or s.startswith("hermes-claude-") or s.startswith("hermes-pair"):
             names.append(s)
@@ -180,42 +183,46 @@ def next_pair_name() -> str:
 
 def start_fresh(name: str | None = None):
     """
-    New pair = two Terminal windows, different roles:
-      window 0 → Hermes only
-      window 1 → Claude Code only
-    Prefer Link existing if you already have Claude with model/context.
+    New pair: two independent Terminal views.
+    Same window set, but each Terminal attaches to a *grouped* session so
+    one can stay on Hermes (:0) while the other stays on Claude (:1).
+    (Plain dual attach to one session always shows the same active window.)
     """
     name = name or next_pair_name()
-    sh(f"tmux has-session -t {name} 2>/dev/null && tmux kill-session -t {name} || true")
-    sh(f"tmux new-session -d -s {name} -n Hermes")
-    wins = sh(f"tmux list-windows -t {name} -F '#{{window_index}}'")
-    if "1" not in wins.split():
-        sh(f"tmux new-window -t {name} -n Claude")
+    view_h = f"{name}-h"
+    view_c = f"{name}-c"
 
-    # Hermes on :0 only (never claude here)
-    sh(f"tmux select-window -t {name}:0")
-    sh(
-        f"tmux send-keys -t {name}:0 -l "
-        f"'printf \"\\n  HERMES · {name}:0\\n\\n\"; hermes'"
-    )
+    # Wipe old base + view sessions
+    for s in (name, view_h, view_c):
+        sh(f"tmux has-session -t {s} 2>/dev/null && tmux kill-session -t {s} || true")
+
+    # Base session: window 0 Hermes, window 1 Claude
+    sh(f"tmux new-session -d -s {name} -n Hermes")
+    sh(f"tmux new-window -t {name} -n Claude")
+
+    # Start apps in the correct windows only
+    sh(f"tmux send-keys -t {name}:0 -l 'printf \"\\n  HERMES · {name}:0\\n\\n\"; hermes'")
     time.sleep(0.05)
     sh(f"tmux send-keys -t {name}:0 Enter")
-
-    # Claude on :1 only
-    sh(f"tmux select-window -t {name}:1")
     sh(f"tmux send-keys -t {name}:1 -l 'claude'")
     time.sleep(0.05)
     sh(f"tmux send-keys -t {name}:1 Enter")
 
-    # Exact window attach — no fallback to whole session (that stuck both on Claude)
+    # Grouped sessions = independent current-window per Terminal
+    sh(f"tmux new-session -d -s {view_h} -t {name}")
+    sh(f"tmux select-window -t {view_h}:0")
+    sh(f"tmux new-session -d -s {view_c} -t {name}")
+    sh(f"tmux select-window -t {view_c}:1")
+
+    # One Terminal per view session (not both on the same session)
     script = f'''
 tell application "Terminal"
   activate
-  do script "tmux attach-session -t {name}:0"
-  delay 0.4
+  do script "tmux attach-session -t {view_h}"
+  delay 0.45
   set idH to id of front window
-  do script "tmux attach-session -t {name}:1"
-  delay 0.4
+  do script "tmux attach-session -t {view_c}"
+  delay 0.45
   set idC to id of front window
   return (idH as string) & "," & (idC as string)
 end tell
@@ -225,15 +232,46 @@ end tell
     if out and "," in out:
         parts = out.split(",", 1)
         hid, cid = parts[0].strip(), parts[1].strip()
+
     save_pair_state(
         name,
         hermes_window_id=hid,
         claude_window_id=cid,
         claude_mode="tmux",
     )
+    # Persist view session names for bridge/front
+    try:
+        import json
+        ap = Path.home() / ".hermes-pong" / "active-pair.json"
+        data = json.loads(ap.read_text()) if ap.exists() else {}
+        data.update(
+            {
+                "session": name,
+                "view_hermes": view_h,
+                "view_claude": view_c,
+                "hermes_window_id": hid,
+                "claude_window_id": cid,
+                "claude_mode": "tmux",
+                "updated": time.time(),
+            }
+        )
+        ap.write_text(json.dumps(data, indent=2))
+        db = load_pairs_db()
+        db[name] = {
+            "hermes_window_id": hid,
+            "claude_window_id": cid,
+            "claude_mode": "tmux",
+            "view_hermes": view_h,
+            "view_claude": view_c,
+            "updated": time.time(),
+        }
+        (Path.home() / ".hermes-pong" / "pairs.json").write_text(json.dumps(db, indent=2))
+    except Exception as e:
+        log(f"save views fail: {e}")
+
     if hid:
         flash_pair_windows(hid, cid)
-    log(f"start_fresh {name} hermes={hid} claude={cid}")
+    log(f"start_fresh {name} views={view_h}/{view_c} hermes={hid} claude={cid}")
     return name
 
 def load_pairs_db() -> dict:
@@ -456,7 +494,8 @@ def wire_pair(name: str, w1: str, w2: str):
 
 
 def kill_pair(name: str):
-    sh(f"tmux kill-session -t {name} 2>/dev/null || true")
+    for s in (name, f"{name}-h", f"{name}-c"):
+        sh(f"tmux kill-session -t {s} 2>/dev/null || true")
     try:
         import json
         db = load_pairs_db()
@@ -465,7 +504,7 @@ def kill_pair(name: str):
             (Path.home() / ".hermes-pong" / "pairs.json").write_text(json.dumps(db, indent=2))
     except Exception:
         pass
-    log(f"killed {name}")
+    log(f"killed {name} (+ views)")
 
 
 
