@@ -192,7 +192,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
-        menu.addItem(item("Send to Claude…", #selector(sendToClaudeMenu)))
         menu.addItem(item("New pair", #selector(newPair)))
         menu.addItem(item("Refresh", #selector(refreshMenu)))
         menu.addItem(.separator())
@@ -207,50 +206,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func refreshMenu() { rebuildMenu() }
-
-    @objc func sendToClaudeMenu() {
-        // Open panel — user types there; also offer quick prompt
-        openPanel()
-        let alert = NSAlert()
-        alert.messageText = "Send to Claude"
-        alert.informativeText = "Task to paste into the Claude window:"
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        field.placeholderString = "Your task…"
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Send")
-        alert.addButton(withTitle: "Cancel")
-        let resp = alert.runModal()
-        guard resp == .alertFirstButtonReturn else { return }
-        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        let bridge = NSString("~/bin/claude-delegate.py").expandingTildeInPath
-        let py = "\(projectRoot)/venv/bin/python"
-        let exe = FileManager.default.isExecutableFile(atPath: py) ? py : "/usr/bin/python3"
-        guard FileManager.default.fileExists(atPath: bridge) else {
-            notify("Hermes Pong", "claude-delegate.py missing in ~/bin")
-            return
-        }
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: exe)
-        task.arguments = [bridge, "--no-wait", text]
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            notify("Hermes Pong", "Sent to Claude — watch that window")
-        } catch {
-            notify("Hermes Pong", "Send failed")
-        }
-    }
-
-    private func notify(_ title: String, _ msg: String) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        let t = title.replacingOccurrences(of: "\"", with: "'")
-        let m = msg.replacingOccurrences(of: "\"", with: "'")
-        p.arguments = ["-e", "display notification \"\(m)\" with title \"\(t)\""]
-        try? p.run()
-    }
 
     @objc func openPanel() {
         let panelPaths = [
