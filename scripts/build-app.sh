@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build Hermes_Pairing.app — native Swift menu bar + Python control window
+# Build Hermes_Pairing.app — native Swift menu bar + nested Panel.app (not "Python")
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,7 +20,6 @@ fi
 rm -rf "$APP"
 mkdir -p "$MACOS" "$RES"
 
-# Compile native menu bar binary (this is what actually shows in the menu bar)
 swiftc -O -o "$MACOS/$APP_NAME" "$SRC_SWIFT" \
   -framework AppKit -framework Foundation \
   -target arm64-apple-macosx13.0
@@ -35,10 +34,69 @@ cp "$ROOT/resources/bolt-orange.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/bolt-black.png" "$RES/" 2>/dev/null || true
 cp "$SRC_PY" "$RES/hermes_pairing.py"
 chmod 644 "$RES/hermes_pairing.py"
-
 echo "$ROOT" > "$RES/project_root"
 
-cat > "$CONTENTS/Info.plist" <<PLIST
+# Nested Panel.app so the control UI is named Hermes_Pairing, not Python
+PANEL="$RES/Panel.app"
+PANEL_CONTENTS="$PANEL/Contents"
+PANEL_MACOS="$PANEL_CONTENTS/MacOS"
+PANEL_RES="$PANEL_CONTENTS/Resources"
+mkdir -p "$PANEL_MACOS" "$PANEL_RES"
+cp "$RES/hermes_pairing.py" "$PANEL_RES/"
+cp "$RES/AppIcon.icns" "$PANEL_RES/" 2>/dev/null || true
+cp "$RES/AppIcon-1024.png" "$PANEL_RES/" 2>/dev/null || true
+cp "$RES/pair-illustration.png" "$PANEL_RES/" 2>/dev/null || true
+cp "$RES/project_root" "$PANEL_RES/"
+
+cat > "$PANEL_MACOS/Panel" <<'LAUNCH'
+#!/bin/bash
+DIR="$(cd "$(dirname "$0")" && pwd)"
+CONTENTS="$(cd "$DIR/.." && pwd)"
+RES="$CONTENTS/Resources"
+ROOT="$(cat "$RES/project_root" 2>/dev/null || true)"
+PY="$ROOT/venv/bin/python"
+if [[ ! -x "$PY" ]]; then PY="/usr/bin/python3"; fi
+export PYTHONUNBUFFERED=1
+# Rename process in Activity Monitor / menu (best-effort)
+exec -a Hermes_Pairing "$PY" "$RES/hermes_pairing.py" --window-only
+LAUNCH
+chmod +x "$PANEL_MACOS/Panel"
+
+cat > "$PANEL_CONTENTS/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>Hermes_Pairing</string>
+  <key>CFBundleDisplayName</key>
+  <string>Hermes_Pairing</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.kulpio.hermes-pairing.panel</string>
+  <key>CFBundleVersion</key>
+  <string>1.1.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.1.0</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleExecutable</key>
+  <string>Panel</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>LSUIElement</key>
+  <false/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Hermes_Pairing controls Terminal windows.</string>
+</dict>
+</plist>
+PLIST
+echo -n "APPL????" > "$PANEL_CONTENTS/PkgInfo"
+
+cat > "$CONTENTS/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -50,9 +108,9 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key>
   <string>com.kulpio.hermes-pairing</string>
   <key>CFBundleVersion</key>
-  <string>1.1.0</string>
+  <string>1.2.0</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.1.0</string>
+  <string>1.2.0</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleExecutable</key>
@@ -72,7 +130,6 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 PLIST
 
 echo -n "APPL????" > "$CONTENTS/PkgInfo"
-
 codesign -s - --force --deep "$APP" 2>/dev/null || true
 
 echo "Built: $APP"

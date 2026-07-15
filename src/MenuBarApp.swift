@@ -21,14 +21,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Dock + menu bar so double-click always feels like the app "opened"
         NSApp.setActivationPolicy(.regular)
 
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             if let boltTemplate {
                 button.image = boltTemplate
                 button.image?.isTemplate = true
-            } else {
-                button.title = "⚡"
             }
+            // Always show a visible glyph so the extra cannot collapse
+            button.title = " ⚡"
             button.toolTip = "Hermes_Pairing"
             button.appearsDisabled = false
         }
@@ -117,9 +117,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if let boltTemplate {
             button.image = boltTemplate
             button.image?.isTemplate = true
-            button.title = ""
+            button.title = " ⚡"
         } else {
-            button.title = "⚡"
+            button.image = nil
+            button.title = " ⚡"
         }
     }
 
@@ -176,44 +177,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func refreshMenu() { rebuildMenu() }
 
     @objc func openPanel() {
+        // Nested Panel.app is branded Hermes_Pairing (avoids "Python" menu name)
+        let panelPaths = [
+            Bundle.main.bundlePath + "/Contents/Resources/Panel.app",
+            "/Applications/Hermes_Pairing.app/Contents/Resources/Panel.app",
+        ]
+        if let panel = panelPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: panel))
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        // Fallback: direct python
         let candidates = [
             "/Applications/Hermes_Pairing.app/Contents/Resources/hermes_pairing.py",
             "\(projectRoot)/src/hermes_pairing.py",
         ]
         guard let script = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-            notify("Hermes_Pairing", "Control panel script missing — reinstall the app")
+            notify("Hermes_Pairing", "Control panel missing — reinstall")
             return
         }
         let pyCandidates = [
             "\(projectRoot)/venv/bin/python",
-            "\(projectRoot)/venv/bin/python3",
             "/usr/bin/python3",
         ]
         guard let py = pyCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            notify("Hermes_Pairing", "Python not found — run install.sh")
+            notify("Hermes_Pairing", "Python not found — run setup.sh")
             return
         }
-
-        // Don't kill existing healthy panel if already up
-        let check = Process()
-        check.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        check.arguments = ["-f", "hermes_pairing.py"]
-        check.standardOutput = Pipe()
-        check.standardError = FileHandle.nullDevice
-        try? check.run()
-        check.waitUntilExit()
-
         let task = Process()
         task.executableURL = URL(fileURLWithPath: py)
         task.arguments = [script, "--window-only"]
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            NSApp.activate(ignoringOtherApps: true)
-        } catch {
-            notify("Hermes_Pairing", "Could not open control panel")
-        }
+        try? task.run()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc func newPair() {

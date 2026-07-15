@@ -368,7 +368,7 @@ class AppDelegate(NSObject):
             btn("Refresh", "refreshUI:", NSMakeRect(PAD, 24, half, 36), self)
         )
         content.addSubview_(
-            btn("Quit panel", "quitPanel:", NSMakeRect(PAD + half + 12, 24, half, 36), self)
+            btn("Close Panel", "quitPanel:", NSMakeRect(PAD + half + 12, 24, half, 36), self)
         )
 
         self.window.setContentView_(content)
@@ -455,6 +455,18 @@ class AppDelegate(NSObject):
 def main():
     import sys
     log(f"main enter args={sys.argv}")
+
+    # Appear as Hermes_Pairing in the menu bar (not "Python") when possible
+    try:
+        from Foundation import NSProcessInfo, NSBundle
+        NSProcessInfo.processInfo().setProcessName_("Hermes_Pairing")
+        info = NSBundle.mainBundle().infoDictionary()
+        if info is not None:
+            info["CFBundleName"] = "Hermes_Pairing"
+            info["CFBundleDisplayName"] = "Hermes_Pairing"
+    except Exception as e:
+        log(f"rename skip: {e}")
+
     app = NSApplication.sharedApplication()
     delegate = AppDelegate.alloc().init()
     app.setDelegate_(delegate)
