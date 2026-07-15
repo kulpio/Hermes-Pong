@@ -2,6 +2,10 @@
 
 Two terminals. One bridge. Hermes hands work to Claude in the **Claude Code window you already have**.
 
+**Landing (free + tips):** https://kulpio.github.io/Hermes_Pairing/
+
+**Download:** https://github.com/kulpio/Hermes_Pairing/releases/latest
+
 ---
 
 ## What this is
