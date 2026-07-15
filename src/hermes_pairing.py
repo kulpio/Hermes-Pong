@@ -179,36 +179,121 @@ def start_fresh(name: str | None = None):
     sh(f"tmux has-session -t {name} 2>/dev/null && tmux kill-session -t {name} || true")
     sh(f"tmux new-session -d -s {name} -n Hermes")
     sh(f"tmux new-window -t {name}:1 -n Claude")
-    sh(f"tmux send-keys -t {name}:1 'cd ~ && claude' Enter")
+    # Launch claude cleanly with -l + Enter (not as confusing inline chat text)
+    sh(f"tmux send-keys -t {name}:1 -l 'claude'")
+    time.sleep(0.05)
+    sh(f"tmux send-keys -t {name}:1 Enter")
+    sh(f'tmux display-message -t {name}:1 "⚡ Hermes Pong — Claude starting…"')
     bring_to_front(name)
     log(f"start_fresh {name}")
     return name
 
 
 def bring_to_front(name: str):
-    sh(
-        f'''osascript -e 'tell application "Terminal" to activate' '''
-        f''' -e 'tell application "Terminal" to do script "tmux attach -t {name}"' '''
+    """Focus existing attached Terminals if any; else attach in a new tab only as last resort."""
+    # Prefer selecting existing session clients — don't spawn windows
+    sh(f"tmux switch-client -t {name}:0 2>/dev/null || true")
+    sh('''osascript -e 'tell application "Terminal" to activate' ''')
+
+
+def run_in_terminal_window(window_id: str, command: str) -> str:
+    """
+    Run a shell command inside the *selected tab* of an existing Terminal window.
+    `do script … in window id` creates a NEW tab — we never want that for link.
+    """
+    # Escape for AppleScript string
+    cmd = command.replace("\\", "\\\\").replace('"', '\\"')
+    script = f'''
+tell application "Terminal"
+  try
+    set w to window id {window_id}
+    set index of w to 1
+    set selected of w to true
+    -- Hop INTO the current tab (does not open a new window/tab)
+    do script "{cmd}" in selected tab of w
+    activate
+    return "OK"
+  on error errMsg
+    return "ERR:" & errMsg
+  end try
+end tell
+'''
+    out = osascript(script)
+    log(f"run_in_terminal_window id={window_id} → {out!r} cmd={command!r}")
+    return out
+
+
+def focus_terminal_window(window_id: str) -> None:
+    osascript(
+        f'''
+tell application "Terminal"
+  try
+    set index of window id {window_id} to 1
+    set selected of window id {window_id} to true
+    activate
+  end try
+end tell
+'''
     )
+
+
+def wire_pair(name: str, w1: str, w2: str):
+    """
+    Use the two Terminal windows the user picked.
+    Hermes tab → attach tmux :0
+    Claude tab → attach tmux :1  (no new Terminal windows)
+    """
+    sh(f"tmux has-session -t {name} 2>/dev/null || tmux new-session -d -s {name} -n Hermes")
+    wins = sh(f"tmux list-windows -t {name} -F '#{{window_index}}'")
+    if "1" not in wins.split():
+        sh(f"tmux new-window -t {name} -n Claude")
+        # rename/move to index 1 if needed
+        sh(f"tmux move-window -s {name}:Claude -t {name}:1 2>/dev/null || true")
+
+    # Detach any stale clients so attach is clean (optional)
+    # Don't kill the session — just hop these windows in.
+
+    # HERMES window — run attach in its current tab
+    r1 = run_in_terminal_window(
+        w1,
+        f"printf '\\n  HERMES  ·  {name}:0\\n\\n'; tmux attach -t {name}:0 || tmux attach -t {name}",
+    )
+    time.sleep(0.5)
+
+    # CLAUDE window — hop into the window the user selected (not a new one)
+    r2 = run_in_terminal_window(
+        w2,
+        f"printf '\\n  CLAUDE  ·  {name}:1\\n  Bridge pastes prompts here + Enter\\n\\n'; "
+        f"tmux select-window -t {name}:1 2>/dev/null; tmux attach -t {name}:1 || tmux attach -t {name}",
+    )
+    time.sleep(0.6)
+    log(f"wire_pair attach results hermes={r1!r} claude={r2!r}")
+
+    # Only launch `claude` if pane doesn't already look like Claude Code
+    pane = sh(f"tmux capture-pane -p -t {name}:1 -S -40 2>/dev/null || true")
+    already = any(
+        x in pane.lower()
+        for x in ("claude code", "claude>", "bypass permissions", "✳", "fable", "anthropic")
+    )
+    if already:
+        log(f"wire_pair: Claude already running in {name}:1 — skip launch")
+        sh(f'tmux display-message -t {name}:1 "⚡ Hermes Pong linked — Claude already running"')
+    else:
+        log(f"wire_pair: starting claude in {name}:1")
+        sh(f"tmux send-keys -t {name}:1 -l 'claude'")
+        time.sleep(0.1)
+        sh(f"tmux send-keys -t {name}:1 Enter")
+        sh(f'tmux display-message -t {name}:1 "⚡ Hermes Pong — launching Claude…"')
+
+    sh(f'tmux display-message -t {name}:0 "⚡ Hermes Pong linked as HERMES ({name})"')
+    focus_terminal_window(w2)
+    focus_terminal_window(w1)
+    log(f"wired {name} w1={w1} w2={w2}")
 
 
 def kill_pair(name: str):
     sh(f"tmux kill-session -t {name} 2>/dev/null || true")
     log(f"killed {name}")
-
-
-def _mouse_down() -> bool:
-    try:
-        from Quartz import (
-            CGEventSourceButtonState,
-            kCGEventSourceStateCombinedSessionState,
-            kCGMouseButtonLeft,
-        )
-        return bool(
-            CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonLeft)
-        )
-    except Exception:
-        return False
 
 
 def _front_terminal_frame_cocoa():
@@ -306,22 +391,6 @@ def show_window_overlay(label: str, color_rgba, duration: float = 1.6):
             pass
 
     threading.Thread(target=_later, daemon=True).start()
-
-
-def wire_pair(name: str, w1: str, w2: str):
-    sh(f"tmux new-session -d -s {name} -n Hermes 2>/dev/null || true")
-    sh(f"tmux new-window -t {name}:1 -n Claude 2>/dev/null || true")
-    sh(
-        f'''osascript -e 'tell application "Terminal" to do script "tmux attach -t {name}:0" in window id {w1}' '''
-    )
-    time.sleep(0.6)
-    sh(
-        f'''osascript -e 'tell application "Terminal" to do script "tmux attach -t {name}:1 || tmux new-window -t {name}:1 -n Claude; tmux attach -t {name}:1" in window id {w2}' '''
-    )
-    time.sleep(0.4)
-    sh(f"tmux send-keys -t {name}:1 'cd ~ && claude' Enter")
-    sh('''osascript -e 'tell application "Terminal" to activate' ''')
-    log(f"wired {name} w1={w1} w2={w2}")
 
 
 def lbl(text, frame, bold=False, size=13.0, secondary=False):
