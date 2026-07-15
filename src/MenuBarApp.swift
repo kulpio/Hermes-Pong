@@ -21,14 +21,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Dock + menu bar so double-click always feels like the app "opened"
         NSApp.setActivationPolicy(.regular)
 
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
+            // ONE icon only: dark custom bolt (no emoji title — that creates a second gold bolt)
             if let boltTemplate {
                 button.image = boltTemplate
                 button.image?.isTemplate = true
+                button.title = ""
+            } else if let sf = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "Hermes_Pairing") {
+                let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+                button.image = sf.withSymbolConfiguration(config)
+                button.image?.isTemplate = true
+                button.title = ""
+            } else {
+                button.title = "HP"
             }
-            // Always show a visible glyph so the extra cannot collapse
-            button.title = " ⚡"
             button.toolTip = "Hermes_Pairing"
             button.appearsDisabled = false
         }
@@ -117,10 +124,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if let boltTemplate {
             button.image = boltTemplate
             button.image?.isTemplate = true
-            button.title = " ⚡"
+            button.title = ""
+        } else if let sf = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "Hermes_Pairing") {
+            button.image = sf
+            button.image?.isTemplate = true
+            button.title = ""
         } else {
             button.image = nil
-            button.title = " ⚡"
+            button.title = "HP"
         }
     }
 
