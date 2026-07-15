@@ -41,6 +41,8 @@ from AppKit import (
     NSTimer,
     NSMenu,
     NSMenuItem,
+    NSAlert,
+    NSAlertFirstButtonReturn,
 )
 from Foundation import NSMakeSize, NSProcessInfo, NSBundle
 import objc
@@ -188,6 +190,7 @@ def start_fresh(name: str | None = None):
     sh(f'tmux display-message -t {name}:0 "⚡ HERMES — cat ~/.hermes-pong/last-claude.txt for replies"')
     save_pair_state(name, claude_mode="tmux")
     bring_to_front(name)
+    # Tip after New pair as well (on main thread via caller)
     log(f"start_fresh {name}")
     return name
 
@@ -415,7 +418,49 @@ def wire_pair(name: str, w1: str, w2: str):
 
 def kill_pair(name: str):
     sh(f"tmux kill-session -t {name} 2>/dev/null || true")
+    # drop from registry
+    try:
+        import json
+        db = load_pairs_db()
+        if name in db:
+            del db[name]
+            (Path.home() / ".hermes-pong" / "pairs.json").write_text(json.dumps(db, indent=2))
+    except Exception:
+        pass
     log(f"killed {name}")
+
+
+def show_pair_persist_tip(pair_name: str = "") -> None:
+    """
+    After connect: explain pair survives app quit until Kill.
+    Don't remind me → ~/.hermes-pong/dont-remind-pair-persist
+    """
+    flag = Path.home() / ".hermes-pong" / "dont-remind-pair-persist"
+    if flag.exists():
+        return
+    label = pair_name or "this pair"
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_("Pair stays connected")
+    alert.setInformativeText_(
+        f"“{label}” stays linked until you hit Kill — even if you quit Hermes Pong.\n\n"
+        "How Hermes talks to Claude (important):\n"
+        "Hermes must run the bridge — chatting in Hermes alone does not appear in Claude.\n\n"
+        "  claude-delegate.py 'your task here'\n\n"
+        "That paste+Enter’s into the Claude window so you see the work there.\n"
+        "Reply mirror: cat ~/.hermes-pong/last-claude.txt"
+    )
+    alert.addButtonWithTitle_("Got it")
+    alert.addButtonWithTitle_("Don't remind me")
+    alert.setAlertStyle_(0)  # informational
+    resp = alert.runModal()
+    # Second button
+    if resp == NSAlertFirstButtonReturn + 1:
+        try:
+            flag.parent.mkdir(parents=True, exist_ok=True)
+            flag.write_text("1\n")
+            log("dont-remind-pair-persist set")
+        except Exception as e:
+            log(f"dont-remind write fail: {e}")
 
 
 def _front_terminal_frame_cocoa():
@@ -809,9 +854,16 @@ class GuideController(NSObject):
         self.titleLabel.setStringValue_(f"Linked · {name}")
         if self.parent:
             self.parent.refreshUI_(None)
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            1.4, self, "closeGuideTimer:", None, False
+        # Tip about persistence + how Hermes talks to Claude
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "showPairTip:", str(name), False
         )
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            0.4, self, "closeGuideTimer:", None, False
+        )
+
+    def showPairTip_(self, name):
+        show_pair_persist_tip(str(name) if name else "")
 
     def closeGuideTimer_(self, timer):
         self.closeGuide()
@@ -997,11 +1049,17 @@ class AppDelegate(NSObject):
 
     def startFresh_(self, sender):
         def work():
-            start_fresh()
+            name = start_fresh()
             time.sleep(0.2)
             self.performSelectorOnMainThread_withObject_waitUntilDone_("refreshUI:", None, False)
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "showPairTip:", str(name or ""), False
+            )
 
         threading.Thread(target=work, daemon=True).start()
+
+    def showPairTip_(self, name):
+        show_pair_persist_tip(str(name) if name else "")
 
     def connectWindows_(self, sender):
         # Instant guide on main thread — no 40s notification lag

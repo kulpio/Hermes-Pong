@@ -129,29 +129,33 @@ def send_via_tmux(target: str, prompt: str) -> None:
 
 
 def send_via_terminal_window(window_id: str, prompt: str) -> None:
-    """Clipboard paste + Return into a live Terminal window (Claude already open)."""
-    # Set clipboard
+    """Clipboard paste + Return into the live Claude Terminal window."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    (STATE_DIR / "last-sent.txt").write_text(prompt)
+
     p = subprocess.run(["pbcopy"], input=prompt, text=True)
     if p.returncode != 0:
         print("[bridge] pbcopy failed", file=sys.stderr)
         sys.exit(1)
 
+    # Robust: focus window, paste, Return. Needs Accessibility for System Events.
     script = f'''
 tell application "Terminal"
   try
-    set index of window id {window_id} to 1
-    set selected of window id {window_id} to true
+    set w to window id {window_id}
+    set index of w to 1
+    set selected of w to true
     activate
   end try
 end tell
-delay 0.25
+delay 0.35
 tell application "System Events"
   tell process "Terminal"
     set frontmost to true
-    -- clear any half-typed junk: select-all + delete optional; skip to avoid nuking Claude
-    keystroke "v" using command down
-    delay 0.2
-    key code 36 -- Return / Enter
+    delay 0.1
+    keystroke "v" using {{command down}}
+    delay 0.25
+    key code 36
   end tell
 end tell
 return "OK"
@@ -162,9 +166,19 @@ return "OK"
     f.close()
     r = subprocess.run(["osascript", f.name], capture_output=True, text=True)
     os.unlink(f.name)
-    print(f"[bridge] window submit → Terminal id {window_id} paste+Return → {r.stdout.strip()!r}")
+    print(
+        f"[bridge] → Claude Terminal id={window_id} "
+        f"paste+Return ({len(prompt)} chars) result={r.stdout.strip()!r}"
+    )
     if r.returncode != 0:
         print(r.stderr, file=sys.stderr)
+        print(
+            "[bridge] If paste failed: System Settings → Privacy → Accessibility — allow Terminal/osascript",
+            file=sys.stderr,
+        )
+    # Also log for Hermes
+    print(f"[bridge] prompt saved: {STATE_DIR / 'last-sent.txt'}")
+    print("[bridge] Look at the Claude window — the task should appear and submit.")
 
 
 def wait_tmux(target: str, max_wait: int = 600, poll: float = 3.0) -> str:
@@ -239,16 +253,20 @@ def main() -> None:
     state = load_state()
     mode = args.mode
     if mode == "auto":
-        # Prefer tmux if session exists; else native window id from state
-        if resolve_tmux_target(args.session, args.window):
+        # Prefer how the pair was linked (window mode = live Claude Code UI)
+        if state.get("claude_mode") == "window" and state.get("claude_window_id"):
+            mode = "window"
+        elif state.get("claude_mode") == "tmux" and resolve_tmux_target(args.session, args.window):
             mode = "tmux"
         elif state.get("claude_window_id"):
             mode = "window"
+        elif resolve_tmux_target(args.session, args.window):
+            mode = "tmux"
         else:
             print("[bridge] No pair. Use Hermes Pong → New pair or Link first.", file=sys.stderr)
             sys.exit(2)
 
-    print(f"[bridge] mode={mode} state_session={state.get('session')}")
+    print(f"[bridge] mode={mode} session={state.get('session')} claude_window={state.get('claude_window_id')}")
 
     if mode == "tmux":
         target = resolve_tmux_target(args.session, args.window)
