@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Hermes_Pairing — polished dark control app for pairing Hermes + Claude terminals.
+Hermes_Pairing control window — multi-pair list, kill/rejoin, dark UI.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 import time
@@ -20,15 +21,13 @@ from AppKit import (
     NSButton,
     NSTextField,
     NSImageView,
+    NSScrollView,
     NSMakeRect,
     NSBackingStoreBuffered,
     NSWindowStyleMaskTitled,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskMiniaturizable,
     NSFloatingWindowLevel,
-    NSMenu,
-    NSMenuItem,
-    NSStatusBar,
     NSFont,
     NSImage,
     NSColor,
@@ -40,17 +39,13 @@ from AppKit import (
 )
 from Foundation import NSMakeSize
 
-SESSION = "hermes-claude"
-CLAUDE_WINDOW = "1"
-STARTER = Path.home() / "bin" / "start-hermes-claude.sh"
-DELEGATE = Path.home() / "bin" / "claude-delegate.py"
+SESSION_PREFIXES = ("hermes-claude", "hermes-pair")
 LOG = Path.home() / "Library" / "Logs" / "Hermes_Pairing.log"
 HERE = Path(__file__).resolve().parent
 ICON = HERE / "AppIcon-1024.png"
 ILLU = HERE / "pair-illustration.png"
-MENU_ICON = HERE / "menubar-template.png"
 
-W, H = 440, 620
+W, H = 460, 680
 PAD = 28
 
 
@@ -77,42 +72,63 @@ def notify(title: str, message: str = ""):
     sh(f'''osascript -e 'display notification "{safe_m}" with title "{safe_t}"' ''')
 
 
-def get_sessions():
+def list_pairs() -> list[str]:
     out = sh("tmux list-sessions -F '#{session_name}' 2>/dev/null || true")
-    return [s for s in out.splitlines() if s.strip()]
+    names = []
+    for s in out.splitlines():
+        s = s.strip()
+        if any(s == p or s.startswith(p + "-") or s.startswith("hermes-pair") for p in SESSION_PREFIXES):
+            names.append(s)
+        elif s.startswith("hermes-pair"):
+            names.append(s)
+    # de-dupe preserve order
+    seen = set()
+    out_list = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            out_list.append(n)
+    return out_list
 
 
-def start_fresh():
-    project = os.getcwd()
-    if STARTER.exists():
-        subprocess.Popen(
-            ["bash", str(STARTER), project],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    else:
-        sh(f"tmux kill-session -t {SESSION} 2>/dev/null || true")
-        sh(f"tmux new-session -d -s {SESSION} -n Hermes")
-        sh(f"tmux new-window -t {SESSION}:1 -n Claude")
-        sh(f"tmux send-keys -t {SESSION}:1 'cd ~ && claude' Enter")
-    bring_pair_to_front()
-    notify("New pair ready", "Terminal is in front")
+def next_pair_name() -> str:
+    existing = set(list_pairs())
+    if not existing:
+        return "hermes-claude"
+    n = 1
+    while True:
+        name = f"hermes-pair-{n}"
+        if name not in existing and not (n == 1 and "hermes-claude" in existing and name == "hermes-pair-1"):
+            # if hermes-claude exists, start at hermes-pair-1 etc.
+            if name not in existing:
+                return name
+        n += 1
+        if n > 50:
+            return f"hermes-pair-{int(time.time()) % 10000}"
 
 
-def bring_pair_to_front():
-    script = f'''
-    tell application "Terminal"
-        activate
-        do script "tmux has-session -t {SESSION} 2>/dev/null && tmux attach -t {SESSION} || echo 'No pair — use New pair'"
-        set frontmost to true
-    end tell
-    tell application "System Events"
-        tell process "Terminal"
-            set frontmost to true
-        end tell
-    end tell
-    '''
-    sh(f"osascript -e {repr(script)}")
+def start_fresh(name: str | None = None):
+    name = name or next_pair_name()
+    sh(f"tmux has-session -t {name} 2>/dev/null && tmux kill-session -t {name} || true")
+    sh(f"tmux new-session -d -s {name} -n Hermes")
+    sh(f"tmux new-window -t {name}:1 -n Claude")
+    sh(f"tmux send-keys -t {name}:1 'cd ~ && claude' Enter")
+    bring_to_front(name)
+    notify("New pair", name)
+    return name
+
+
+def bring_to_front(name: str):
+    sh(
+        f'''osascript -e 'tell application "Terminal" to activate' '''
+        f''' -e 'tell application "Terminal" to do script "tmux attach -t {name}"' '''
+    )
+    sh('''osascript -e 'tell application "System Events" to set frontmost of process "Terminal" to true' ''')
+
+
+def kill_pair(name: str):
+    sh(f"tmux kill-session -t {name} 2>/dev/null || true")
+    notify("Killed", name)
 
 
 def pick_window(prompt: str, label: str):
@@ -157,19 +173,8 @@ def pick_window(prompt: str, label: str):
     return win_id
 
 
-def wire(w1, w2):
-    sh(
-        f'''osascript -e 'tell application "Terminal" to do script "clear; echo HERMES; tmux new-session -d -s {SESSION} 2>/dev/null || true; tmux attach -t {SESSION}" in window id {w1}' '''
-    )
-    time.sleep(1.2)
-    sh(
-        f'''osascript -e 'tell application "Terminal" to do script "clear; echo CLAUDE; tmux new-window -t {SESSION}:{CLAUDE_WINDOW} -n Claude 2>/dev/null || true; tmux send-keys -t {SESSION}:{CLAUDE_WINDOW} \\"cd ~ && claude\\" Enter" in window id {w2}' '''
-    )
-    sh('''osascript -e 'tell application "Terminal" to activate' ''')
-    notify("Linked", "Both windows are connected")
-
-
 def connect_windows():
+    name = next_pair_name()
     w1 = pick_window("Hover the Hermes Terminal for 2s", "HERMES")
     if not w1:
         return
@@ -179,24 +184,15 @@ def connect_windows():
     if w1 == w2:
         notify("Same window", "Pick two different Terminals")
         return
-    wire(w1, w2)
-
-
-def attach_existing():
-    sessions = get_sessions()
-    if not sessions:
-        notify("Nothing to rejoin", "Start a new pair first")
-        return
-    name = SESSION if SESSION in sessions else sessions[0]
     sh(
-        f'''osascript -e 'tell application "Terminal"
-        activate
-        do script "tmux attach -t {name}"
-        set frontmost to true
-    end tell' '''
+        f'''osascript -e 'tell application "Terminal" to do script "clear; echo HERMES; tmux new-session -d -s {name} 2>/dev/null || true; tmux attach -t {name}" in window id {w1}' '''
     )
-    sh('''osascript -e 'tell application "System Events" to set frontmost of process "Terminal" to true' ''')
-    notify("Back in the pair", name)
+    time.sleep(1.2)
+    sh(
+        f'''osascript -e 'tell application "Terminal" to do script "clear; echo CLAUDE; tmux new-window -t {name}:1 -n Claude 2>/dev/null || true; tmux send-keys -t {name}:1 \\"cd ~ && claude\\" Enter" in window id {w2}' '''
+    )
+    sh('''osascript -e 'tell application "Terminal" to activate' ''')
+    notify("Linked", name)
 
 
 def lbl(text, frame, bold=False, size=13.0, secondary=False):
@@ -231,75 +227,26 @@ def btn(title, action, frame, target):
 
 
 class AppDelegate(NSObject):
-    statusItem = None
     window = None
     statusLabel = None
+    listContainer = None
+    pair_buttons = None  # keep refs
 
     def applicationDidFinishLaunching_(self, notification):
         log("applicationDidFinishLaunching")
         NSApp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
-
         if ICON.exists():
             img = NSImage.alloc().initWithContentsOfFile_(str(ICON))
             if img:
                 img.setSize_(NSMakeSize(128, 128))
                 NSApp.setApplicationIconImage_(img)
-
-        window_only = bool(getattr(self, "_window_only", False))
-        if not window_only:
-            self._build_status_item()
+        self.pair_buttons = []
         self._build_window()
-        self.refreshStatus_(None)
-
+        self.refreshUI_(None)
         NSApp.activateIgnoringOtherApps_(True)
         if self.window:
             self.window.makeKeyAndOrderFront_(None)
-        log(f"ready window_only={window_only}")
-
-    def _build_status_item(self):
-        bar = NSStatusBar.systemStatusBar()
-        # Wider fixed length so Zap always has room
-        self.statusItem = bar.statusItemWithLength_(48.0)
-        b = self.statusItem.button()
-        if b:
-            if MENU_ICON.exists():
-                timg = NSImage.alloc().initWithContentsOfFile_(str(MENU_ICON))
-                if timg:
-                    timg.setSize_(NSMakeSize(18, 18))
-                    timg.setTemplate_(True)
-                    b.setImage_(timg)
-            b.setTitle_(" Zap")
-            b.setToolTip_("Hermes_Pairing")
-            try:
-                b.setFont_(NSFont.boldSystemFontOfSize_(13.0))
-            except Exception:
-                pass
-        menu = NSMenu.alloc().init()
-        menu.setAutoenablesItems_(False)
-
-        def add(title, action=None):
-            if title is None:
-                menu.addItem_(NSMenuItem.separatorItem())
-                return
-            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-                title, action, ""
-            )
-            if action:
-                item.setTarget_(self)
-            menu.addItem_(item)
-
-        add("Show Hermes_Pairing", "showWindow:")
-        add(None)
-        add("New pair", "startFresh:")
-        add("Link two Terminals", "connectWindows:")
-        add("Rejoin pair", "attachDefault:")
-        add(None)
-        add("Quit", "quitApp:")
-        self.statusItem.setMenu_(menu)
-        try:
-            self.statusItem.setHighlightMode_(True)
-        except Exception:
-            pass
+        log("ready")
 
     def _build_window(self):
         style = (
@@ -317,10 +264,9 @@ class AppDelegate(NSObject):
         self.window.center()
         self.window.setLevel_(NSFloatingWindowLevel)
         self.window.setReleasedWhenClosed_(False)
-        # darker surface
         try:
             self.window.setBackgroundColor_(
-                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.09, 0.09, 0.10, 1.0)
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.07, 0.07, 0.08, 1.0)
             )
         except Exception:
             pass
@@ -328,7 +274,6 @@ class AppDelegate(NSObject):
         content = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, H))
         y = H - PAD
 
-        # Header
         y -= 34
         content.addSubview_(
             lbl("Hermes  ↔  Claude", NSMakeRect(PAD, y, W - 2 * PAD, 34), bold=True, size=26)
@@ -336,25 +281,23 @@ class AppDelegate(NSObject):
         y -= 24
         content.addSubview_(
             lbl(
-                "Two terminals. One bridge.",
+                "Two terminals. One bridge. Multiple pairs OK.",
                 NSMakeRect(PAD, y, W - 2 * PAD, 20),
-                size=14,
+                size=13,
                 secondary=True,
             )
         )
 
-        # Status
-        y -= 32
+        y -= 30
         self.statusLabel = lbl(
-            "○ Idle  ·  no pair running",
+            "○ Idle",
             NSMakeRect(PAD, y, W - 2 * PAD, 20),
             size=13,
             secondary=True,
         )
         content.addSubview_(self.statusLabel)
 
-        # Illustration
-        y -= 128
+        y -= 120
         illu = ILLU if ILLU.exists() else Path(
             "/Users/dylandemnard/DigitalBrain/Boreal/tools/hermes-claude-app/resources/pair-illustration.png"
         )
@@ -362,153 +305,158 @@ class AppDelegate(NSObject):
             nsimg = NSImage.alloc().initWithContentsOfFile_(str(illu))
             if nsimg:
                 iv = NSImageView.alloc().initWithFrame_(
-                    NSMakeRect(PAD, y, W - 2 * PAD, 118)
+                    NSMakeRect(PAD, y, W - 2 * PAD, 110)
                 )
                 iv.setImage_(nsimg)
                 iv.setImageScaling_(NSImageScaleProportionallyUpOrDown)
                 iv.setImageAlignment_(NSImageAlignCenter)
                 content.addSubview_(iv)
 
-        # SETUP
         y -= 36
         content.addSubview_(
             lbl("SETUP", NSMakeRect(PAD, y, W - 2 * PAD, 16), size=11, secondary=True)
         )
 
-        y -= 46
+        y -= 44
         content.addSubview_(
-            btn("New pair", "startFresh:", NSMakeRect(PAD, y, W - 2 * PAD, 40), self)
+            btn("New pair", "startFresh:", NSMakeRect(PAD, y, W - 2 * PAD, 38), self)
         )
-        y -= 26
+        y -= 24
         content.addSubview_(
             lbl(
-                "Create a fresh Hermes + Claude pair when nothing is running.",
-                NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 22),
+                "Creates another Hermes + Claude pair (does not replace existing ones).",
+                NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 20),
                 size=12,
                 secondary=True,
             )
         )
 
-        y -= 52
+        y -= 48
         content.addSubview_(
             btn(
                 "Link two open Terminals",
                 "connectWindows:",
-                NSMakeRect(PAD, y, W - 2 * PAD, 40),
+                NSMakeRect(PAD, y, W - 2 * PAD, 38),
                 self,
             )
         )
-        y -= 26
+        y -= 24
         content.addSubview_(
             lbl(
-                "Wire two Terminal windows you already opened.",
-                NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 22),
+                "Wire two Terminal windows you already opened into a new pair.",
+                NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 20),
                 size=12,
                 secondary=True,
             )
         )
 
-        # COME BACK
         y -= 40
         content.addSubview_(
-            lbl("COME BACK", NSMakeRect(PAD, y, W - 2 * PAD, 16), size=11, secondary=True)
+            lbl("ACTIVE PAIRS", NSMakeRect(PAD, y, W - 2 * PAD, 16), size=11, secondary=True)
         )
 
-        y -= 46
-        content.addSubview_(
-            btn(
-                "Rejoin pair",
-                "attachDefault:",
-                NSMakeRect(PAD, y, W - 2 * PAD, 40),
-                self,
-            )
+        # dynamic list area
+        y -= 200
+        self.listContainer = NSView.alloc().initWithFrame_(
+            NSMakeRect(PAD, y, W - 2 * PAD, 190)
         )
-        y -= 26
-        content.addSubview_(
-            lbl(
-                "Bring the existing pair to the front. Creates nothing new.",
-                NSMakeRect(PAD + 2, y, W - 2 * PAD - 4, 22),
-                size=12,
-                secondary=True,
-            )
-        )
+        content.addSubview_(self.listContainer)
 
-        # Footer row — clear gap above, no overlap
-        footer_y = 28
+        # footer
         half = (W - 2 * PAD - 12) / 2
         content.addSubview_(
-            btn(
-                "Refresh status",
-                "refreshStatus:",
-                NSMakeRect(PAD, footer_y, half, 36),
-                self,
-            )
+            btn("Refresh", "refreshUI:", NSMakeRect(PAD, 24, half, 36), self)
         )
         content.addSubview_(
-            btn(
-                "Quit",
-                "quitApp:",
-                NSMakeRect(PAD + half + 12, footer_y, half, 36),
-                self,
-            )
+            btn("Quit panel", "quitPanel:", NSMakeRect(PAD + half + 12, 24, half, 36), self)
         )
 
         self.window.setContentView_(content)
 
-    def showWindow_(self, sender):
-        if self.window:
-            NSApp.activateIgnoringOtherApps_(True)
-            self.window.makeKeyAndOrderFront_(None)
+    def _rebuild_list(self):
+        # clear
+        for sub in list(self.listContainer.subviews()):
+            sub.removeFromSuperview()
+        self.pair_buttons = []
+
+        pairs = list_pairs()
+        if not pairs:
+            self.listContainer.addSubview_(
+                lbl(
+                    "No pairs yet — use New pair.",
+                    NSMakeRect(0, 150, W - 2 * PAD, 20),
+                    size=12,
+                    secondary=True,
+                )
+            )
+            return
+
+        y = 150
+        for name in pairs:
+            row = NSView.alloc().initWithFrame_(NSMakeRect(0, y - 8, W - 2 * PAD, 44))
+            row.addSubview_(
+                lbl(f"●  {name}", NSMakeRect(0, 12, 200, 20), bold=True, size=13)
+            )
+            b1 = btn("Front", "frontPair:", NSMakeRect(210, 6, 70, 30), self)
+            b2 = btn("Kill", "killPair:", NSMakeRect(288, 6, 70, 30), self)
+            b1.setIdentifier_(name)
+            b2.setIdentifier_(name)
+            row.addSubview_(b1)
+            row.addSubview_(b2)
+            self.listContainer.addSubview_(row)
+            self.pair_buttons.append((b1, b2, name))
+            y -= 48
 
     def startFresh_(self, sender):
         def work():
             start_fresh()
-            time.sleep(0.4)
-            self.refreshStatus_(None)
+            time.sleep(0.3)
+            self.refreshUI_(None)
 
         threading.Thread(target=work, daemon=True).start()
 
     def connectWindows_(self, sender):
-        threading.Thread(target=connect_windows, daemon=True).start()
-
-    def attachDefault_(self, sender):
         def work():
-            attach_existing()
+            connect_windows()
             time.sleep(0.3)
-            self.refreshStatus_(None)
+            self.refreshUI_(None)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def refreshStatus_(self, sender):
-        sessions = get_sessions()
-        text = (
-            f"● Linked  ·  {', '.join(sessions)}"
-            if sessions
-            else "○ Idle  ·  no pair running"
-        )
-        if self.statusLabel:
-            self.statusLabel.setStringValue_(text)
+    def frontPair_(self, sender):
+        name = sender.identifier()
+        if name:
+            bring_to_front(str(name))
 
-    def quitApp_(self, sender):
-        log("quit")
+    def killPair_(self, sender):
+        name = sender.identifier()
+        if name:
+            kill_pair(str(name))
+            self.refreshUI_(None)
+
+    def refreshUI_(self, sender):
+        pairs = list_pairs()
+        if pairs:
+            self.statusLabel.setStringValue_(f"● {len(pairs)} active  ·  {', '.join(pairs)}")
+        else:
+            self.statusLabel.setStringValue_("○ Idle  ·  no pair running")
+        self._rebuild_list()
+
+    def quitPanel_(self, sender):
+        # close window only; menu bar Swift app keeps running
+        if self.window:
+            self.window.close()
         NSApp.terminate_(None)
 
-    def applicationShouldHandleReopen_hasVisibleWindows_(self, app, flag):
-        self.showWindow_(None)
-        return True
-
     def applicationShouldTerminateAfterLastWindowClosed_(self, sender):
-        return False
+        return True
 
 
 def main():
     import sys
-    window_only = "--window-only" in sys.argv
-    log(f"main enter window_only={window_only}")
+    log(f"main enter args={sys.argv}")
     app = NSApplication.sharedApplication()
     delegate = AppDelegate.alloc().init()
-    # Stash flag for applicationDidFinishLaunching
-    delegate._window_only = window_only
     app.setDelegate_(delegate)
     app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
     app.run()

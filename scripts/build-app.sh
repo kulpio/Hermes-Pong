@@ -30,6 +30,9 @@ cp "$ROOT/resources/menubar-template@2x.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/AppIcon.icns" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/AppIcon-1024.png" "$RES/" 2>/dev/null || true
 cp "$ROOT/resources/pair-illustration.png" "$RES/" 2>/dev/null || true
+cp "$ROOT/resources/bolt-blue.png" "$RES/" 2>/dev/null || true
+cp "$ROOT/resources/bolt-orange.png" "$RES/" 2>/dev/null || true
+cp "$ROOT/resources/bolt-black.png" "$RES/" 2>/dev/null || true
 cp "$SRC_PY" "$RES/hermes_pairing.py"
 
 echo "$ROOT" > "$RES/project_root"
