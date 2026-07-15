@@ -1,16 +1,16 @@
 # Hermes Pong
 
-Two terminals. One bridge. Hermes talks to Claude while you watch.
+Two terminals. One bridge. Hermes hands work to Claude in the **Claude Code window you already have**.
 
 ---
 
 ## What this is
 
-**Hermes Pong** pairs a **Hermes** Terminal with a **Claude Code** Terminal so Hermes can hand work to Claude.
+**Hermes Pong** links a Hermes Terminal to a Claude Code Terminal so Hermes can paste tasks into Claude (with Enter), while you keep Claude’s model, resume, and chat.
 
-- You keep **one Dock icon** and a **menu-bar bolt**.
-- The **control panel** lists pairs (Front / Kill).
-- Pairs stay linked **until you Kill them** — even if you quit Hermes Pong.
+- One Dock icon + menu-bar bolt  
+- Control panel: New pair / Link / Front / Kill  
+- Pair stays until **Kill** — even if you quit the app  
 
 ---
 
@@ -22,160 +22,101 @@ cd Hermes_Pairing
 bash scripts/setup.sh
 ```
 
-Optional login item:
-
-```bash
-bash scripts/setup.sh --login
-```
-
+Optional login item: `bash scripts/setup.sh --login`  
 App: `/Applications/HermesPong.app`
 
 ---
 
-## How it works (simple)
+## How it works
 
 ```
-┌─────────────┐         bridge          ┌─────────────┐
-│   Hermes    │  ───────────────────►   │ Claude Code │
-│  terminal   │   (paste + Enter into   │  terminal   │
-│             │    the Claude window)   │             │
-└─────────────┘                         └─────────────┘
-        ▲                                      │
-        │         optional live stream         │
-        └──────── Watch Claude stream ◄────────┘
+Hermes terminal                    Claude Code terminal (yours)
+      │                                      ▲
+      │   claude-delegate.py                 │
+      └──── paste + Enter ───────────────────┘
 ```
 
-1. You pick (or create) two Terminal windows.
-2. Hermes Pong **remembers their window ids**.
-3. When Hermes **delegates**, the bridge targets Claude:
-   - **Link existing** → inject into **your** Claude window (keeps model + session).
-   - **New pair** → Claude runs in a **fresh** tmux pane (clean start).
-4. **Watch Claude stream** shows what actually landed in the Claude **tmux** side + last-sent (safety view if Hermes used raw tmux).
+1. You **Link** (or create) two Terminals.  
+2. Pong saves the **window ids**.  
+3. When Hermes delegates, it must call **`claude-delegate.py`**, which pastes into the **Claude Code window** and presses Enter.  
+4. You watch Claude work in that window — model, resume, context stay.
 
-**Important:** Just chatting in Hermes does nothing to Claude. Hermes must run the bridge (`claude-delegate.py`) so text is pasted into Claude and Enter is pressed.
+**Chatting in Hermes alone never appears in Claude.** Hermes has to use the bridge.
 
 ---
 
-## Two ways to pair
+## Link existing terminals (keep model + context)
 
-### A) Link existing terminals  ← keep Claude model & context
+Use when Claude Code is already open.
 
-Use this when Claude Code is **already open** with your model, resume, folder, etc.
-
-**Steps**
-
-1. Open Hermes in one Terminal (however you usually run it).
-2. Open **Claude Code** in another Terminal — pick model, resume if you want.
-3. Open **Hermes Pong** → control panel.
-4. Click **Link existing terminals**.
-5. Click the **Hermes** Terminal (popup shows ✓ Hermes).
-6. Click the **Claude** Terminal (popup shows ✓ Claude).
-7. Done. Pair stays until **Kill**.
-
-Nothing is typed into Claude. Your session stays intact.
-
-### B) New pair  ← two fresh Terminals
-
-Use this for a clean setup.
-
-**Steps**
-
-1. Open **Hermes Pong** → **New pair**.
-2. Two Terminal windows open:
-   - one attached to Hermes pane
-   - one attached to Claude pane (`claude` starts there)
-3. Claude is **new** (no prior chat/model choice until you set it in that window).
-
-You can still have multiple pairs; old ones stay until Kill.
+1. Hermes running in one Terminal.  
+2. Claude Code in another — pick model / resume as usual.  
+3. Hermes Pong → **Link existing terminals**.  
+4. Click **Hermes** Terminal (✓ in popup).  
+5. Click **Claude** Terminal (✓ in popup).  
+6. Done. Nothing is injected into Claude at link time.
 
 ---
 
-## Panel buttons
+## New pair (two fresh Terminals)
 
-| Control | What it does |
-|--------|----------------|
+1. Hermes Pong → **New pair**.  
+2. Two new Terminal windows open (Hermes pane + Claude pane).  
+3. Claude starts **clean** (set model/session in that window if you need them).
+
+---
+
+## Panel
+
+| Control | Meaning |
+|--------|---------|
 | **New pair** | 2 new Terminals. Claude starts clean. |
-| **Link existing terminals** | Register open Hermes + Claude windows. **Keeps Claude model/resume/chat.** |
-| **Watch Claude stream** | Live I/O of what Hermes sent + Claude tmux pane. |
-| **Front** | Raise + quick blink the **saved** pair windows. |
-| **Kill** | Drop the pair (tmux session + registry). |
-| **Refresh** | Reload pair list. |
-
-Light copy under each button in the panel explains the same thing.
+| **Link existing terminals** | Register open Hermes + Claude. **Keeps Claude model/resume/chat.** |
+| **Front** | Raise the paired windows (short blink). |
+| **Kill** | Drop the pair. |
+| **Refresh** | Reload list. |
 
 ---
 
-## After you connect
-
-A tip may appear (always on top):
-
-- Pair survives until **Kill**, even if the app quits.
-- Link = keep Claude context; New pair = clean Claude.
-- **Don't remind me** saves `~/.hermes-pong/dont-remind-pair-persist`.
-
-Control panel, guide popup, tip, and stream stay **above other apps** so they don’t hide under Terminal.
-
----
-
-## Bridge (Hermes → Claude)
-
-Hermes (or any tool) should call:
+## Bridge (must land in Claude Code)
 
 ```bash
 python3 ~/bin/claude-delegate.py --no-wait 'Your task. When done print ##CLAUDE_DONE## and a short summary.'
 ```
 
-That:
+- **Link existing** → window mode → paste into **your** Claude Code window.  
+- **New pair** → tmux mode → paste into the Claude Terminal of that pair.  
 
-1. Reads `~/.hermes-pong/active-pair.json` (window vs tmux mode).
-2. **Window mode** (Link existing Claude Code) → paste + Return into that Claude window.
-3. **Tmux mode** (New pair) → paste + Enter into `session:1`.
-4. Writes `~/.hermes-pong/last-sent.txt` (and often `last-claude.txt` in tmux mode).
+**Do not** use raw `tmux send-keys -t hermes-claude:1 …` — that hits a hidden pane, not the Claude UI you’re watching.
 
-**Do not** use raw:
-
-```bash
-tmux send-keys -t hermes-claude:1 '...'
-```
-
-That hits a hidden pane; your Claude Code UI can stay empty. Use **Watch Claude stream** if you need to see that pane anyway.
-
-Skill for Hermes agents: `hermes-pong-bridge`.
+Hermes skill: `hermes-pong-bridge`.
 
 ---
 
-## Files on disk
+## Files
 
 | Path | Role |
 |------|------|
 | `~/.hermes-pong/active-pair.json` | Current pair + window ids + mode |
-| `~/.hermes-pong/pairs.json` | All pairs (for Front) |
+| `~/.hermes-pong/pairs.json` | All pairs |
 | `~/.hermes-pong/last-sent.txt` | Last bridge prompt |
-| `~/.hermes-pong/last-claude.txt` | Last captured reply |
-| `~/Library/Logs/HermesPong.log` | App log |
+| `~/.hermes-pong/last-claude.txt` | Last captured reply (tmux mode) |
+| `~/Library/Logs/HermesPong.log` | Log |
 
 ---
 
-## Permissions (macOS)
+## Permissions
 
-If paste into Claude fails:
-
-**System Settings → Privacy & Security → Accessibility**  
-Allow **Terminal** / **osascript** (and Hermes Pong if listed).
-
-Automation for controlling Terminal may also be required the first time.
+If paste fails: **System Settings → Privacy & Security → Accessibility** (Terminal / osascript).
 
 ---
 
 ## Dev
 
 ```bash
-bash scripts/build-app.sh
-bash scripts/install.sh
+bash scripts/build-app.sh && bash scripts/install.sh
 bash scripts/push-update.sh "msg"
 ```
 
-Local path (Dylan):  
-`~/DigitalBrain/Boreal/tools/hermes-claude-app`
-
-GitHub: [kulpio/Hermes_Pairing](https://github.com/kulpio/Hermes_Pairing)
+Repo: [kulpio/Hermes_Pairing](https://github.com/kulpio/Hermes_Pairing)  
+Local: `~/DigitalBrain/Boreal/tools/hermes-claude-app`
