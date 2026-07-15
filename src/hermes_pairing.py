@@ -563,10 +563,138 @@ def kill_pair(name: str):
 
 
 
+def _usage_path() -> Path:
+    return Path.home() / ".hermes-pong" / "usage.json"
+
+
+def load_usage() -> dict:
+    import json
+    p = _usage_path()
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            pass
+    return {
+        "pair_count": 0,
+        "tip_prompt_shown": False,
+        "tip_never_ask": False,
+        "supporter": False,
+        "paid_cents": 0,
+    }
+
+
+def save_usage(data: dict) -> None:
+    import json
+    p = _usage_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2))
+
+
+def record_successful_pair() -> dict:
+    """Bump pairing count after New pair or Link succeeds."""
+    u = load_usage()
+    u["pair_count"] = int(u.get("pair_count") or 0) + 1
+    u["last_pair_at"] = time.time()
+    save_usage(u)
+    log(f"pair_count={u['pair_count']}")
+    return u
+
+
+def user_is_paid_supporter(min_cents: int = 50) -> bool:
+    """Local honor system: marked supporter or recorded paid_cents >= min."""
+    u = load_usage()
+    if u.get("supporter"):
+        return True
+    try:
+        return int(u.get("paid_cents") or 0) >= min_cents
+    except Exception:
+        return False
+
+
+def mark_supporter(paid_cents: int = 200) -> None:
+    u = load_usage()
+    u["supporter"] = True
+    u["paid_cents"] = max(int(u.get("paid_cents") or 0), int(paid_cents))
+    u["tip_never_ask"] = True
+    save_usage(u)
+    log(f"marked supporter paid_cents={u['paid_cents']}")
+
+
+TIP_URL_2 = "https://donate.stripe.com/eVqeVdgFp8V22cj7pR1B606"
+TIP_URL_5 = "https://donate.stripe.com/6oU14ndtdefmaIP39B1B607"
+TIP_URL_CUSTOM = "https://donate.stripe.com/5kQfZhgFpfjq6szdOf1B608"
+LANDING_URL = "https://kulpio.github.io/Hermes_Pairing/"
+
+
+def maybe_show_tip_prompt() -> None:
+    """
+    After 3 successful pairings, ask once if they want to tip —
+    skip if supporter / paid >= $0.50 / never ask.
+    """
+    u = load_usage()
+    if u.get("tip_never_ask") or u.get("tip_prompt_shown"):
+        return
+    if user_is_paid_supporter(50):
+        return
+    if int(u.get("pair_count") or 0) < 3:
+        return
+
+    try:
+        NSApp.activateIgnoringOtherApps_(True)
+    except Exception:
+        pass
+
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_("Enjoying Hermes Pong?")
+    alert.setInformativeText_(
+        "You've set up 3 pairs — nice.\n\n"
+        "The app is free forever. If it's useful, a small tip helps Dylan keep shipping.\n\n"
+        "Already tipped? Choose “I already tipped.”"
+    )
+    alert.addButtonWithTitle_("Tip $2")
+    alert.addButtonWithTitle_("Tip $5")
+    alert.addButtonWithTitle_("I already tipped")
+    alert.addButtonWithTitle_("Maybe later")
+    # Extra: never ask — use accessory? Keep 4 buttons max is OK for NSAlert
+    # Map: 1000=$2, 1001=$5, 1002=already, 1003=later
+    alert.setAlertStyle_(0)
+    resp = alert.runModal()
+
+    u = load_usage()
+    u["tip_prompt_shown"] = True
+    save_usage(u)
+
+    if resp == NSAlertFirstButtonReturn:  # $2
+        sh(f'open "{TIP_URL_2}"')
+        # Assume intent; they can re-open if cancel
+        log("tip prompt → $2 stripe")
+    elif resp == NSAlertFirstButtonReturn + 1:  # $5
+        sh(f'open "{TIP_URL_5}"')
+        log("tip prompt → $5 stripe")
+    elif resp == NSAlertFirstButtonReturn + 2:  # already tipped
+        mark_supporter(200)
+        log("tip prompt → already tipped")
+    else:
+        # Maybe later — ask once more never? offer second alert for don't ask
+        later = NSAlert.alloc().init()
+        later.setMessageText_("Got it")
+        later.setInformativeText_("We'll leave you alone. You can tip anytime from the site.")
+        later.addButtonWithTitle_("OK")
+        later.addButtonWithTitle_("Don't ask again")
+        r2 = later.runModal()
+        if r2 == NSAlertFirstButtonReturn + 1:
+            u = load_usage()
+            u["tip_never_ask"] = True
+            save_usage(u)
+            log("tip prompt → never ask")
+        else:
+            log("tip prompt → maybe later")
+
+
 def show_pair_persist_tip(pair_name: str = "") -> None:
     """
     After connect: pair survives app quit until Kill.
-    Always on top of other windows (including Terminal).
     Don't remind me → ~/.hermes-pong/dont-remind-pair-persist
     """
     flag = Path.home() / ".hermes-pong" / "dont-remind-pair-persist"
@@ -1082,7 +1210,7 @@ class AppDelegate(NSObject):
 
         y -= 34
         content.addSubview_(
-            lbl("Hermes  ↔  Claude", NSMakeRect(PAD, y, W - 2 * PAD, 34), bold=True, size=26)
+            lbl("Hermes Pong", NSMakeRect(PAD, y, W - 2 * PAD, 34), bold=True, size=26)
         )
         y -= 24
         content.addSubview_(
