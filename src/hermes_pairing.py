@@ -203,29 +203,46 @@ def load_pairs_db() -> dict:
     return {}
 
 
-def flash_terminal_window(window_id: str, times: int = 3) -> None:
-    """macOS-style attention: raise + pulse visibility on the real paired window."""
+def flash_terminal_window(window_id: str, times: int = 1) -> None:
+    """Quick clean blink (<0.25s). Prefer flash_pair_windows for Front."""
     if not window_id or not str(window_id).isdigit():
         return
-    script = f'''
-tell application "Terminal"
-  try
-    set w to window id {window_id}
-    set index of w to 1
-    set selected of w to true
-    activate
-    repeat {times} times
-      set visible of w to false
-      delay 0.07
-      set visible of w to true
-      delay 0.09
-    end repeat
-    set index of w to 1
-  end try
-end tell
-'''
-    osascript(script)
-    log(f"flash window {window_id}")
+    flash_pair_windows(str(window_id), None)
+
+
+def flash_pair_windows(hermes_id: str | None, claude_id: str | None) -> None:
+    """
+    One clean macOS-style blink of the paired windows.
+    Total animation ~0.12s — raise both, hide once, show once.
+    """
+    ids = []
+    for wid in (claude_id, hermes_id):
+        if wid and str(wid).isdigit() and str(wid) not in ids:
+            ids.append(str(wid))
+    if not ids:
+        return
+
+    # Build AppleScript that pulses all target windows in one shot
+    lines = [
+        'tell application "Terminal"',
+        "  try",
+    ]
+    for i, wid in enumerate(ids):
+        lines.append(f"    set w{i} to window id {wid}")
+    # Raise Claude first (if present), Hermes on top
+    for i in range(len(ids)):
+        lines.append(f"    set index of w{i} to 1")
+    lines.append("    activate")
+    for i in range(len(ids)):
+        lines.append(f"    set visible of w{i} to false")
+    lines.append("    delay 0.10")
+    for i in range(len(ids)):
+        lines.append(f"    set visible of w{i} to true")
+    for i in range(len(ids)):
+        lines.append(f"    set index of w{i} to 1")
+    lines += ["  end try", "end tell"]
+    osascript("\n".join(lines))
+    log(f"flash_pair_windows ids={ids}")
 
 
 def bring_to_front(name: str):
@@ -250,12 +267,12 @@ def bring_to_front(name: str):
     cid = entry.get("claude_window_id")
     log(f"bring_to_front {name} hermes={hid} claude={cid}")
 
-    if cid and str(cid).isdigit():
-        flash_terminal_window(str(cid), times=2)
-        time.sleep(0.05)
-    if hid and str(hid).isdigit():
-        flash_terminal_window(str(hid), times=3)
-    elif not hid and not cid:
+    if (hid and str(hid).isdigit()) or (cid and str(cid).isdigit()):
+        flash_pair_windows(
+            str(hid) if hid and str(hid).isdigit() else None,
+            str(cid) if cid and str(cid).isdigit() else None,
+        )
+    else:
         sh(f"tmux switch-client -t {name}:0 2>/dev/null || true")
         sh('''osascript -e 'tell application "Terminal" to activate' ''')
         log("bring_to_front: no saved window ids — Terminal activate only")
