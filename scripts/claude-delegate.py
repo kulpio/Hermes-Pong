@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""
+claude-delegate.py — send a task to the Claude side of a Hermes Pong pair.
+
+Two modes:
+  tmux   — Claude runs inside tmux (capture-pane works; Hermes can "see" output)
+  window — Claude is a live Terminal window; we clipboard-paste + press Return
+
+Always submits with Enter/Return (no silent text sitting in the input box).
+Writes the last captured reply to ~/.hermes-pong/last-claude.txt for Hermes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+MARKER = "##CLAUDE_DONE##"
+STATE_DIR = Path.home() / ".hermes-pong"
+STATE_FILE = STATE_DIR / "active-pair.json"
+LAST_REPLY = STATE_DIR / "last-claude.txt"
+
+
+def run(cmd: list[str], input_text: str | None = None) -> str:
+    r = subprocess.run(cmd, input=input_text, capture_output=True, text=True)
+    return (r.stdout or "").strip()
+
+
+def run_ok(cmd: list[str], input_text: str | None = None) -> bool:
+    r = subprocess.run(cmd, input=input_text, capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def osascript(script: str) -> str:
+    r = subprocess.run(["osascript", "-e", script] if "\n" not in script else ["osascript"], 
+                       input=script if "\n" in script else None,
+                       capture_output=True, text=True)
+    # multi-line via temp for reliability
+    if "\n" in script:
+        import tempfile, os
+        f = tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False)
+        f.write(script)
+        f.close()
+        r = subprocess.run(["osascript", f.name], capture_output=True, text=True)
+        os.unlink(f.name)
+    return (r.stdout or "").strip()
+
+
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def list_pair_sessions() -> list[str]:
+    out = run(["tmux", "list-sessions", "-F", "#{session_name}"])
+    names = []
+    for line in out.splitlines():
+        s = line.strip()
+        if s == "hermes-claude" or s.startswith("hermes-claude-") or s.startswith("hermes-pair"):
+            names.append(s)
+    return names
+
+
+def resolve_tmux_target(session: str | None, window: str) -> str | None:
+    if session:
+        return f"{session}:{window}"
+    state = load_state()
+    if state.get("session"):
+        return f"{state['session']}:{window}"
+    pairs = list_pair_sessions()
+    if not pairs:
+        return None
+    name = "hermes-claude" if "hermes-claude" in pairs else pairs[0]
+    return f"{name}:{window}"
+
+
+def flash_tmux(target: str, msg: str) -> None:
+    run_ok(["tmux", "display-message", "-t", target, msg])
+
+
+def capture_tmux(target: str, lines: int = 400) -> str:
+    return run(["tmux", "capture-pane", "-p", "-t", target, "-S", f"-{lines}"])
+
+
+def save_reply(text: str) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    LAST_REPLY.write_text(text)
+    # Also dump into Hermes pane if known
+    state = load_state()
+    sess = state.get("session")
+    if sess:
+        preview = text[-1500:] if len(text) > 1500 else text
+        banner = (
+            f"\n\n──────── Hermes Pong · Claude reply ────────\n"
+            f"{preview}\n"
+            f"──────── end (full: {LAST_REPLY}) ────────\n\n"
+        )
+        run_ok(["tmux", "load-buffer", "-"], input_text=banner)
+        run_ok(["tmux", "paste-buffer", "-t", f"{sess}:0", "-d"])
+
+
+def send_via_tmux(target: str, prompt: str) -> None:
+    run_ok(["tmux", "select-window", "-t", target])
+    flash_tmux(target, "⚡ Hermes Pong: submitting task (paste + Enter)…")
+    time.sleep(0.05)
+
+    if not run_ok(["tmux", "load-buffer", "-"], input_text=prompt):
+        for i in range(0, len(prompt), 400):
+            run_ok(["tmux", "send-keys", "-t", target, "-l", prompt[i : i + 400]])
+            time.sleep(0.02)
+    else:
+        run_ok(["tmux", "paste-buffer", "-t", target, "-d"])
+
+    time.sleep(0.2)
+    # Must submit — unsent text in the input is useless
+    run_ok(["tmux", "send-keys", "-t", target, "Enter"])
+    time.sleep(0.05)
+    run_ok(["tmux", "send-keys", "-t", target, "C-m"])
+    flash_tmux(target, "⚡ Hermes Pong: Enter sent — watch Claude work here")
+    print(f"[bridge] tmux submit → {target} ({len(prompt)} chars) + Enter")
+
+
+def send_via_terminal_window(window_id: str, prompt: str) -> None:
+    """Clipboard paste + Return into a live Terminal window (Claude already open)."""
+    # Set clipboard
+    p = subprocess.run(["pbcopy"], input=prompt, text=True)
+    if p.returncode != 0:
+        print("[bridge] pbcopy failed", file=sys.stderr)
+        sys.exit(1)
+
+    script = f'''
+tell application "Terminal"
+  try
+    set index of window id {window_id} to 1
+    set selected of window id {window_id} to true
+    activate
+  end try
+end tell
+delay 0.25
+tell application "System Events"
+  tell process "Terminal"
+    set frontmost to true
+    -- clear any half-typed junk: select-all + delete optional; skip to avoid nuking Claude
+    keystroke "v" using command down
+    delay 0.2
+    key code 36 -- Return / Enter
+  end tell
+end tell
+return "OK"
+'''
+    import tempfile, os
+    f = tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False)
+    f.write(script)
+    f.close()
+    r = subprocess.run(["osascript", f.name], capture_output=True, text=True)
+    os.unlink(f.name)
+    print(f"[bridge] window submit → Terminal id {window_id} paste+Return → {r.stdout.strip()!r}")
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+
+
+def wait_tmux(target: str, max_wait: int = 600, poll: float = 3.0) -> str:
+    start = time.time()
+    last = ""
+    stable = 0
+    last_flash = 0.0
+    while time.time() - start < max_wait:
+        out = capture_tmux(target)
+        if MARKER in out:
+            flash_tmux(target, "⚡ Hermes Pong: done marker seen")
+            parts = out.split(MARKER)
+            reply = parts[-1].strip() if len(parts) > 1 else out
+            save_reply(reply)
+            return reply
+        if out == last:
+            stable += 1
+            if stable >= 8:
+                flash_tmux(target, "⚡ Hermes Pong: output stable")
+                reply = "\n".join(out.split("\n")[-200:])
+                save_reply(reply)
+                return reply
+        else:
+            stable = 0
+            last = out
+        now = time.time()
+        if now - last_flash > 15:
+            flash_tmux(target, f"⚡ Hermes Pong: Claude working… {int(now - start)}s")
+            # Mirror a live tail to Hermes so you see what Claude is doing
+            state = load_state()
+            sess = state.get("session")
+            if sess:
+                tail = "\n".join(out.split("\n")[-12:])
+                run_ok(
+                    ["tmux", "display-message", "-t", f"{sess}:0", f"Claude tail: {tail[-80:]}"]
+                )
+            last_flash = now
+        time.sleep(poll)
+    flash_tmux(target, "⚡ Hermes Pong: timeout")
+    reply = capture_tmux(target)[-2000:]
+    save_reply(reply)
+    return "Timeout.\n" + reply
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("prompt", nargs="*")
+    ap.add_argument("-s", "--session", default=None)
+    ap.add_argument("-w", "--window", default="1", help="tmux Claude window index")
+    ap.add_argument("--no-wait", action="store_true")
+    ap.add_argument("--max-wait", type=int, default=600)
+    ap.add_argument("--mode", choices=("auto", "tmux", "window"), default="auto")
+    args = ap.parse_args()
+
+    if not args.prompt:
+        print(
+            "Usage: claude-delegate.py 'task…'\n"
+            "  Always paste + Enter. Writes ~/.hermes-pong/last-claude.txt\n"
+            "  Hermes can: cat ~/.hermes-pong/last-claude.txt",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    prompt = " ".join(args.prompt)
+    if MARKER not in prompt:
+        prompt = (
+            prompt.rstrip()
+            + f"\n\nWhen completely done, print exactly {MARKER} on its own line, "
+            "then a short summary of what you did."
+        )
+
+    state = load_state()
+    mode = args.mode
+    if mode == "auto":
+        # Prefer tmux if session exists; else native window id from state
+        if resolve_tmux_target(args.session, args.window):
+            mode = "tmux"
+        elif state.get("claude_window_id"):
+            mode = "window"
+        else:
+            print("[bridge] No pair. Use Hermes Pong → New pair or Link first.", file=sys.stderr)
+            sys.exit(2)
+
+    print(f"[bridge] mode={mode} state_session={state.get('session')}")
+
+    if mode == "tmux":
+        target = resolve_tmux_target(args.session, args.window)
+        if not target:
+            print("[bridge] No tmux pair session", file=sys.stderr)
+            sys.exit(2)
+        print(f"[bridge] target {target}")
+        # Bring Claude window to front so you SEE it work
+        run_ok(["tmux", "select-window", "-t", target])
+        send_via_tmux(target, prompt)
+        if args.no_wait:
+            print("[bridge] submitted (no-wait). Watch Claude Terminal. "
+                  f"Later: cat {LAST_REPLY}")
+            return
+        print("[bridge] waiting — Claude pane should show activity; Hermes gets a mirror when done")
+        result = wait_tmux(target, max_wait=args.max_wait)
+        print("\n=== CLAUDE RESPONSE ===\n")
+        print(result)
+        print(f"\n[bridge] also saved → {LAST_REPLY}")
+        return
+
+    # window mode
+    wid = str(state.get("claude_window_id") or "")
+    if not wid.isdigit():
+        print("[bridge] No claude_window_id in state for window mode", file=sys.stderr)
+        sys.exit(2)
+    send_via_terminal_window(wid, prompt)
+    if args.no_wait:
+        print("[bridge] submitted to Terminal window (no-wait). Watch that window.")
+        return
+    print(
+        "[bridge] window mode: watch Claude Terminal yourself; "
+        f"when done, copy output or re-run with tmux mode.\n"
+        f"(Live capture needs Claude inside tmux — use New pair for full feedback.)"
+    )
+
+
+if __name__ == "__main__":
+    main()

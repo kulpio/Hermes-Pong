@@ -179,11 +179,12 @@ def start_fresh(name: str | None = None):
     sh(f"tmux has-session -t {name} 2>/dev/null && tmux kill-session -t {name} || true")
     sh(f"tmux new-session -d -s {name} -n Hermes")
     sh(f"tmux new-window -t {name}:1 -n Claude")
-    # Launch claude cleanly with -l + Enter (not as confusing inline chat text)
     sh(f"tmux send-keys -t {name}:1 -l 'claude'")
     time.sleep(0.05)
     sh(f"tmux send-keys -t {name}:1 Enter")
     sh(f'tmux display-message -t {name}:1 "⚡ Hermes Pong — Claude starting…"')
+    sh(f'tmux display-message -t {name}:0 "⚡ HERMES — cat ~/.hermes-pong/last-claude.txt for replies"')
+    save_pair_state(name, claude_mode="tmux")
     bring_to_front(name)
     log(f"start_fresh {name}")
     return name
@@ -237,58 +238,113 @@ end tell
     )
 
 
+def save_pair_state(
+    session: str,
+    hermes_window_id: str | None = None,
+    claude_window_id: str | None = None,
+    claude_mode: str = "tmux",
+) -> None:
+    """Persist active pair so the bridge knows where Claude lives."""
+    import json
+
+    state_dir = Path.home() / ".hermes-pong"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / "active-pair.json"
+    data = {
+        "session": session,
+        "hermes_window_id": hermes_window_id,
+        "claude_window_id": claude_window_id,
+        "claude_mode": claude_mode,  # tmux | window
+        "updated": time.time(),
+    }
+    path.write_text(json.dumps(data, indent=2))
+    log(f"saved pair state {data}")
+
+
+def terminal_tab_looks_like_claude(window_id: str) -> bool:
+    """Best-effort: Terminal window name often contains Claude Code markers."""
+    wins = list_terminal_windows()
+    for wid, title in wins:
+        if wid == str(window_id):
+            t = title.lower()
+            return any(x in t for x in ("claude", "✳", "fable"))
+    return False
+
+
 def wire_pair(name: str, w1: str, w2: str):
     """
-    Use the two Terminal windows the user picked.
-    Hermes tab → attach tmux :0
-    Claude tab → attach tmux :1  (no new Terminal windows)
+    Hermes window → attach to tmux :0 (orchestration / see bridge results).
+    Claude window:
+      - If already Claude Code TUI: DO NOT type shell/tmux into it (that becomes
+        unsent chat junk). Just register the window for paste+Enter bridge.
+      - If plain shell: attach to tmux :1 and launch claude so work is visible
+        and capture-pane works (Hermes can see what Claude did).
     """
     sh(f"tmux has-session -t {name} 2>/dev/null || tmux new-session -d -s {name} -n Hermes")
     wins = sh(f"tmux list-windows -t {name} -F '#{{window_index}}'")
     if "1" not in wins.split():
         sh(f"tmux new-window -t {name} -n Claude")
-        # rename/move to index 1 if needed
-        sh(f"tmux move-window -s {name}:Claude -t {name}:1 2>/dev/null || true")
 
-    # Detach any stale clients so attach is clean (optional)
-    # Don't kill the session — just hop these windows in.
-
-    # HERMES window — run attach in its current tab
+    # HERMES — always hop shell → tmux :0
     r1 = run_in_terminal_window(
         w1,
-        f"printf '\\n  HERMES  ·  {name}:0\\n\\n'; tmux attach -t {name}:0 || tmux attach -t {name}",
+        f"printf '\\n  HERMES Pong · {name}:0\\n  cat ~/.hermes-pong/last-claude.txt  # last Claude reply\\n\\n'; "
+        f"tmux attach -t {name}:0 || tmux attach -t {name}",
     )
-    time.sleep(0.5)
+    time.sleep(0.4)
+    log(f"hermes attach {r1!r}")
 
-    # CLAUDE window — hop into the window the user selected (not a new one)
+    claude_is_app = terminal_tab_looks_like_claude(w2)
+    if claude_is_app:
+        # Leave Claude alone — only record window for keystroke bridge
+        log(f"Claude window {w2} looks like Claude Code — no tmux inject")
+        focus_terminal_window(w2)
+        save_pair_state(name, hermes_window_id=w1, claude_window_id=w2, claude_mode="window")
+        # Still keep a clean Claude pane in tmux for optional full capture later
+        sh(f'tmux display-message -t {name}:0 "⚡ Linked: Hermes=tmux Claude=native window {w2}"')
+        # Tell Hermes pane
+        sh(
+            f"tmux send-keys -t {name}:0 -l "
+            f"'# Claude is the native Terminal you picked (id {w2}). "
+            f"Bridge uses paste+Enter there. For full capture, prefer New pair.'"
+        )
+        sh(f"tmux send-keys -t {name}:0 Enter")
+        focus_terminal_window(w1)
+        log(f"wired {name} w1={w1} w2={w2} mode=window")
+        return
+
+    # Claude is a shell → attach to tmux :1 and ensure Claude runs THERE (visible)
     r2 = run_in_terminal_window(
         w2,
-        f"printf '\\n  CLAUDE  ·  {name}:1\\n  Bridge pastes prompts here + Enter\\n\\n'; "
-        f"tmux select-window -t {name}:1 2>/dev/null; tmux attach -t {name}:1 || tmux attach -t {name}",
+        f"printf '\\n  CLAUDE · Hermes Pong {name}:1\\n  You will SEE Claude work in this window.\\n\\n'; "
+        f"tmux attach -t {name}:1 || tmux attach -t {name}",
     )
-    time.sleep(0.6)
-    log(f"wire_pair attach results hermes={r1!r} claude={r2!r}")
+    time.sleep(0.5)
+    log(f"claude attach {r2!r}")
 
-    # Only launch `claude` if pane doesn't already look like Claude Code
     pane = sh(f"tmux capture-pane -p -t {name}:1 -S -40 2>/dev/null || true")
     already = any(
         x in pane.lower()
-        for x in ("claude code", "claude>", "bypass permissions", "✳", "fable", "anthropic")
+        for x in ("claude code", "claude>", "bypass permissions", "✳", "fable", "anthropic", "trust this folder")
     )
     if already:
-        log(f"wire_pair: Claude already running in {name}:1 — skip launch")
-        sh(f'tmux display-message -t {name}:1 "⚡ Hermes Pong linked — Claude already running"')
+        log(f"Claude already in tmux {name}:1")
+        sh(f'tmux display-message -t {name}:1 "⚡ Hermes Pong — Claude live here"')
     else:
-        log(f"wire_pair: starting claude in {name}:1")
-        sh(f"tmux send-keys -t {name}:1 -l 'claude'")
+        log(f"starting claude in tmux {name}:1")
+        sh(f"tmux send-keys -t {name}:1 C-c")
         time.sleep(0.1)
+        sh(f"tmux send-keys -t {name}:1 -l 'claude'")
+        time.sleep(0.05)
         sh(f"tmux send-keys -t {name}:1 Enter")
-        sh(f'tmux display-message -t {name}:1 "⚡ Hermes Pong — launching Claude…"')
+        sh(f'tmux display-message -t {name}:1 "⚡ Hermes Pong — Claude starting (watch this window)"')
 
-    sh(f'tmux display-message -t {name}:0 "⚡ Hermes Pong linked as HERMES ({name})"')
+    sh(f'tmux display-message -t {name}:0 "⚡ Hermes Pong HERMES — replies → ~/.hermes-pong/last-claude.txt"')
+    save_pair_state(name, hermes_window_id=w1, claude_window_id=w2, claude_mode="tmux")
     focus_terminal_window(w2)
+    time.sleep(0.2)
     focus_terminal_window(w1)
-    log(f"wired {name} w1={w1} w2={w2}")
+    log(f"wired {name} w1={w1} w2={w2} mode=tmux")
 
 
 def kill_pair(name: str):

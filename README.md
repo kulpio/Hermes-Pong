@@ -38,6 +38,12 @@ Opens **Hermes Pong** in `/Applications`.
 
 ## Bridge (from Hermes)
 
+Always **paste + Enter** (not silent text in the box).  
+Claude’s reply is saved to `~/.hermes-pong/last-claude.txt` for Hermes.
+
+**Best visibility:** use **New pair** so Claude runs inside tmux in its window.
+
+
 ```bash
 python ~/bin/claude-delegate.py "Your task… end with ##CLAUDE_DONE##"
 ```
