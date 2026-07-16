@@ -167,6 +167,27 @@
       font-size: .85rem;
       color: var(--muted);
     }
+    .tip-tagline {
+      width: 100%;
+      margin: 0 0 14px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px dashed rgba(38, 2, 241, 0.22);
+      background: linear-gradient(105deg, rgba(38,2,241,.06), rgba(217,119,86,.08));
+      color: var(--text);
+      font-size: .98rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      text-align: center;
+      line-height: 1.35;
+    }
+    .tip-tagline span {
+      display: block;
+      margin-top: 4px;
+      font-weight: 500;
+      color: var(--muted);
+      font-size: .88rem;
+    }
     .steps {
       list-style: none;
       padding: 0;
@@ -317,26 +338,30 @@
         Download is free. If it helps, leave a tip — same download either way.
         Stripe checkout, then GitHub release.
       </p>
+      <p class="tip-tagline">
+        Share a fraction of the savings you’ll make!
+        <span>Gotta feed those kiddos too lol · every tip link lets you set your own amount (even under $5)</span>
+      </p>
       <div class="price-grid">
         <a class="btn primary" href="https://github.com/kulpio/Hermes-Pong/releases/latest/download/HermesPong-macOS.zip">
           <span class="amt">$0</span>
           <span class="hint">Free download</span>
         </a>
-        <a class="btn" href="https://donate.stripe.com/eVqeVdgFp8V22cj7pR1B606">
-          <span class="amt">$2</span>
-          <span class="hint">Tip · Stripe</span>
+        <a class="btn" href="https://donate.stripe.com/7sYcN560Lb3acQX9xZ1B609">
+          <span class="amt">$10</span>
+          <span class="hint">Tip · edit amount</span>
         </a>
-        <a class="btn accent" href="https://donate.stripe.com/6oU14ndtdefmaIP39B1B607">
-          <span class="amt">$5</span>
-          <span class="hint">Tip · Stripe</span>
+        <a class="btn accent" href="https://donate.stripe.com/fZufZhbl58V2cQX9xZ1B60a">
+          <span class="amt">$20</span>
+          <span class="hint">Tip · edit amount</span>
         </a>
-        <a class="btn" href="https://donate.stripe.com/5kQfZhgFpfjq6szdOf1B608">
-          <span class="amt">More</span>
-          <span class="hint">You choose</span>
+        <a class="btn" href="https://donate.stripe.com/00wfZh3SD8V2g399xZ1B60b">
+          <span class="amt">$100</span>
+          <span class="hint">Tip · edit amount</span>
         </a>
       </div>
       <p class="note">
-        Tips optional.
+        Tips optional. On Stripe you can raise or lower the amount (min $1).
         <a href="https://x.com/DDemnard" style="color:#2602f1">Follow on X</a><br>
         After paying, Stripe sends you to the release page for the zip.
         Or skip the tip and download free above.
