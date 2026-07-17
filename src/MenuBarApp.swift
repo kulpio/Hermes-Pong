@@ -383,12 +383,80 @@ enum Workers {
         return true
     }
 
+    static func setWorkerLabel(pair: String, workerId: String, label: String) {
+        var db = PairState.loadPairsDb()
+        var entry = db[pair] as? [String: Any] ?? [:]
+        var ws = list(from: entry)
+        guard let idx = ws.firstIndex(where: { ($0["id"] as? String) == workerId }) else { return }
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        ws[idx]["label"] = trimmed
+        entry["workers"] = ws
+        if idx == 0 { entry["worker_label"] = trimmed }
+        entry["updated"] = Date().timeIntervalSince1970
+        db[pair] = entry
+        Pong.writeJSON(PairState.pairsPath, db)
+        syncActive(pair, entry: entry)
+        TerminalTheme.applyPair(pair)
+        Pong.log("rename worker \(pair)/\(workerId) → \(trimmed)")
+    }
+
+    static func setWorkerColors(pair: String, workerId: String, colors: TerminalTheme.Colors) {
+        var db = PairState.loadPairsDb()
+        var entry = db[pair] as? [String: Any] ?? [:]
+        var ws = list(from: entry)
+        guard let idx = ws.firstIndex(where: { ($0["id"] as? String) == workerId }) else { return }
+        ws[idx]["colors"] = colors.asDict()
+        entry["workers"] = ws
+        entry["updated"] = Date().timeIntervalSince1970
+        db[pair] = entry
+        Pong.writeJSON(PairState.pairsPath, db)
+        syncActive(pair, entry: entry)
+        TerminalTheme.applyPair(pair)
+        Pong.log("colors worker \(pair)/\(workerId)")
+    }
+
+    static func setPairDisplayName(_ pair: String, _ name: String) {
+        var db = PairState.loadPairsDb()
+        var entry = db[pair] as? [String: Any] ?? [:]
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        entry["display_name"] = trimmed
+        entry["updated"] = Date().timeIntervalSince1970
+        db[pair] = entry
+        Pong.writeJSON(PairState.pairsPath, db)
+        syncActive(pair, entry: entry)
+        TerminalTheme.applyPair(pair)
+        Pong.log("rename pair \(pair) → \(trimmed)")
+    }
+
+    static func setPairColors(_ pair: String, colors: TerminalTheme.Colors) {
+        var db = PairState.loadPairsDb()
+        var entry = db[pair] as? [String: Any] ?? [:]
+        entry["colors"] = colors.asDict()
+        entry["updated"] = Date().timeIntervalSince1970
+        db[pair] = entry
+        Pong.writeJSON(PairState.pairsPath, db)
+        syncActive(pair, entry: entry)
+        TerminalTheme.applyPair(pair)
+        Pong.log("colors pair \(pair)")
+    }
+
+    private static func syncActive(_ pair: String, entry: [String: Any]) {
+        var active = Pong.loadJSON(PairState.activePath)
+        if active["session"] as? String == pair {
+            for (k, v) in entry { active[k] = v }
+            active["updated"] = Date().timeIntervalSince1970
+            Pong.writeJSON(PairState.activePath, active)
+        }
+    }
+
     static func frontWorker(pair: String, workerId: String) {
         let entry = PairState.loadPairsDb()[pair] as? [String: Any] ?? [:]
         let ws = list(from: entry)
         guard let w = ws.first(where: { ($0["id"] as? String) == workerId }) else { return }
         let wid = "\(w["window_id"] ?? "")"
         if Int(wid) != nil {
+            TerminalTheme.applyPair(pair)
             Pairing.flashPairWindows(wid, nil)
             return
         }
@@ -407,6 +475,130 @@ enum Workers {
         }
     }
 }
+
+
+// MARK: - Terminal titles + colors
+
+/// Per-window look for Hermes / each worker. Stored on pair or workers[].colors.
+enum TerminalTheme {
+    /// RGB 0…1
+    struct Colors {
+        var bg: (CGFloat, CGFloat, CGFloat)
+        var text: (CGFloat, CGFloat, CGFloat)
+        var highlight: (CGFloat, CGFloat, CGFloat)
+
+        static let hermesDefault = Colors(
+            bg: (0.06, 0.07, 0.12),
+            text: (0.90, 0.92, 0.98),
+            highlight: (0.15, 0.01, 0.95)
+        )
+        static let workerDefault = Colors(
+            bg: (0.10, 0.08, 0.06),
+            text: (0.95, 0.93, 0.88),
+            highlight: (0.85, 0.45, 0.30)
+        )
+
+        static func from(_ any: Any?) -> Colors? {
+            guard let d = any as? [String: Any] else { return nil }
+            func trip(_ key: String, _ fb: (CGFloat, CGFloat, CGFloat)) -> (CGFloat, CGFloat, CGFloat) {
+                if let a = d[key] as? [Any], a.count >= 3 {
+                    let r = CGFloat((a[0] as? Double) ?? Double("\(a[0])") ?? Double(fb.0))
+                    let g = CGFloat((a[1] as? Double) ?? Double("\(a[1])") ?? Double(fb.1))
+                    let b = CGFloat((a[2] as? Double) ?? Double("\(a[2])") ?? Double(fb.2))
+                    return (r, g, b)
+                }
+                return fb
+            }
+            let fb = hermesDefault
+            return Colors(bg: trip("bg", fb.bg), text: trip("text", fb.text), highlight: trip("highlight", fb.highlight))
+        }
+
+        func asDict() -> [String: Any] {
+            [
+                "bg": [bg.0, bg.1, bg.2],
+                "text": [text.0, text.1, text.2],
+                "highlight": [highlight.0, highlight.1, highlight.2],
+            ]
+        }
+
+        /// Terminal AppleScript uses 16-bit RGB 0…65535
+        func t16(_ c: (CGFloat, CGFloat, CGFloat)) -> String {
+            let r = Int(max(0, min(1, c.0)) * 65535)
+            let g = Int(max(0, min(1, c.1)) * 65535)
+            let b = Int(max(0, min(1, c.2)) * 65535)
+            return "{\(r), \(g), \(b)}"
+        }
+
+        var asNSColors: (bg: NSColor, text: NSColor, hi: NSColor) {
+            (
+                NSColor(calibratedRed: bg.0, green: bg.1, blue: bg.2, alpha: 1),
+                NSColor(calibratedRed: text.0, green: text.1, blue: text.2, alpha: 1),
+                NSColor(calibratedRed: highlight.0, green: highlight.1, blue: highlight.2, alpha: 1)
+            )
+        }
+    }
+
+    static func escapeAS(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    /// Set custom title + colors on a Terminal window by id.
+    static func apply(windowId: String?, title: String?, colors: Colors?) {
+        guard let wid = windowId, Int(wid) != nil else { return }
+        var lines: [String] = ["tell application \"Terminal\""]
+        lines.append("  try")
+        lines.append("    set W to window id \(wid)")
+        if let title, !title.isEmpty {
+            let t = escapeAS(title)
+            lines.append("    set custom title of W to \"\(t)\"")
+            // also try tab title
+            lines.append("    try")
+            lines.append("      set custom title of selected tab of W to \"\(t)\"")
+            lines.append("    end try")
+        }
+        if let c = colors {
+            lines.append("    try")
+            lines.append("      set background color of W to \(c.t16(c.bg))")
+            lines.append("      set normal text color of W to \(c.t16(c.text))")
+            lines.append("      set bold text color of W to \(c.t16(c.highlight))")
+            lines.append("      set cursor color of W to \(c.t16(c.highlight))")
+            lines.append("    end try")
+            // highlight / selection — best-effort (varies by macOS Terminal version)
+            lines.append("    try")
+            lines.append("      set selected text color of W to \(c.t16(c.highlight))")
+            lines.append("    end try")
+        }
+        lines.append("  end try")
+        lines.append("end tell")
+        let script = lines.joined(separator: "\n")
+        let out = Pong.osascript(script)
+        if !out.isEmpty { Pong.log("theme apply \(wid) → \(out)") }
+        else { Pong.log("theme apply window=\(wid) title=\(title ?? "-")") }
+    }
+
+    static func applyPair(_ pair: String) {
+        let entry = PairState.loadPairsDb()[pair] as? [String: Any] ?? [:]
+        let display = (entry["display_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hermesTitle = (display?.isEmpty == false) ? "● \(display!) · Hermes" : "● Hermes · \(pair)"
+        let hColors = Colors.from(entry["colors"]) ?? .hermesDefault
+        let hid = entry["hermes_window_id"].flatMap { v -> String? in
+            let s = "\(v)"; return (s == "<null>" || s.isEmpty) ? nil : s
+        }
+        apply(windowId: hid, title: hermesTitle, colors: hColors)
+
+        let ws = Workers.list(from: entry)
+        for w in ws {
+            let wid = "\(w["window_id"] ?? "")"
+            let id = (w["id"] as? String) ?? "?"
+            let lab = (w["label"] as? String) ?? "Worker"
+            let title = "→ \(lab) · \(id)"
+            let cols = Colors.from(w["colors"]) ?? .workerDefault
+            apply(windowId: Int(wid) != nil ? wid : nil, title: title, colors: cols)
+        }
+    }
+}
+
 
 // MARK: - Pairing operations (Terminal + tmux, ports of the Python panel)
 
@@ -655,6 +847,7 @@ enum Pairing {
         }
         let labels = list.map { $0.label }.joined(separator: ", ")
         Pong.log("start_fresh \(name) workers=[\(labels)] hermes=\(hid ?? "-") primaryWorker=\(primaryWid ?? "-")")
+        TerminalTheme.applyPair(name)
         Tips.afterSuccessfulPair()
         return name
     }
@@ -1651,8 +1844,6 @@ final class PanelController: NSObject {
             return
         }
 
-        // Layout top-down in container (AppKit: origin bottom-left).
-        // Use full height so multi-worker teams aren't clipped.
         let top: CGFloat = listContainer.bounds.height > 0 ? listContainer.bounds.height - 4 : 200
         var y = top
         let db = PairState.loadPairsDb()
@@ -1667,9 +1858,13 @@ final class PanelController: NSObject {
                     "type": (entry["worker_type"] as? String) ?? "linked",
                 ]]
             }
+            let display = (entry["display_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let hermesTitle = display.isEmpty ? name : display
+            let hCols = TerminalTheme.Colors.from(entry["colors"]) ?? .hermesDefault
+            let hNS = hCols.asNSColors
 
             // —— Hermes hub ——
-            let hermesH: CGFloat = 34
+            let hermesH: CGFloat = 36
             y -= hermesH
             let hermesRow = NSView(frame: NSRect(x: 0, y: y, width: boxW, height: hermesH))
             hermesRow.wantsLayer = true
@@ -1677,79 +1872,117 @@ final class PanelController: NSObject {
                 NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.16, alpha: 1).cgColor
             hermesRow.layer?.cornerRadius = 8
 
-            // Blue hub dot
-            let hub = NSView(frame: NSRect(x: 8, y: 10, width: 12, height: 12))
-            hub.wantsLayer = true
-            hub.layer?.backgroundColor =
-                NSColor(calibratedRed: 0.15, green: 0.01, blue: 0.95, alpha: 1).cgColor
-            hub.layer?.cornerRadius = 6
-            hermesRow.addSubview(hub)
+            // Color swatch (click → colors)
+            hermesRow.addSubview(swatchButton(
+                color: hNS.hi,
+                frame: NSRect(x: 8, y: 10, width: 14, height: 14),
+                id: name,
+                action: #selector(hermesColorPressed(_:))
+            ))
 
-            hermesRow.addSubview(Self.label("Hermes  ·  \(name)",
-                frame: NSRect(x: 28, y: 8, width: 150, height: 18), bold: true, size: 12))
+            // Name (click → rename)
+            hermesRow.addSubview(nameButton(
+                "Hermes · \(hermesTitle)",
+                frame: NSRect(x: 28, y: 6, width: 140, height: 24),
+                id: name,
+                action: #selector(hermesNamePressed(_:))
+            ))
             hermesRow.addSubview(button("Front", #selector(frontPressed(_:)),
-                NSRect(x: 178, y: 4, width: 48, height: 26), id: name))
+                NSRect(x: 172, y: 5, width: 46, height: 26), id: name))
             hermesRow.addSubview(button("Kill", #selector(killPressed(_:)),
-                NSRect(x: 228, y: 4, width: 44, height: 26), id: name))
+                NSRect(x: 220, y: 5, width: 42, height: 26), id: name))
             let pperms = PairState.permissions(for: name)
             let pon = ["ban_mcp", "ban_root", "ban_network", "ban_system_paths", "repo_only"]
                 .filter { (pperms[$0] as? Bool) == true }.count
             let pnote = !((pperms["custom_prompt"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let ptitle = (pon > 0 || pnote) ? "Perms·\(pon + (pnote ? 1 : 0))" : "Perms"
             hermesRow.addSubview(button(ptitle, #selector(permsPressed(_:)),
-                NSRect(x: 274, y: 4, width: 78, height: 26), id: name))
+                NSRect(x: 264, y: 5, width: 72, height: 26), id: name))
+            // Apply titles/colors when list refreshes (cheap)
+            TerminalTheme.applyPair(name)
             listContainer.addSubview(hermesRow)
 
-            // —— Team members under Hermes ——
             for (i, w) in ws.enumerated() {
                 let wid = (w["id"] as? String) ?? "w\(i + 1)"
                 let lab = (w["label"] as? String) ?? "worker"
                 let isLast = i == ws.count - 1
-                // Pure ASCII so nothing fails to render
                 let branch = isLast ? "`->" : "|->"
-                let rowH: CGFloat = 32
+                let rowH: CGFloat = 34
                 y -= rowH
-
                 let row = NSView(frame: NSRect(x: 0, y: y, width: boxW, height: rowH))
-                // Vertical rail under hub
-                let rail = NSView(frame: NSRect(x: 12, y: isLast ? rowH / 2 : 0, width: 2, height: isLast ? rowH / 2 : rowH))
+                let rail = NSView(frame: NSRect(x: 13, y: isLast ? rowH / 2 : 0, width: 2, height: isLast ? rowH / 2 : rowH))
                 rail.wantsLayer = true
                 rail.layer?.backgroundColor =
                     NSColor(calibratedRed: 0.35, green: 0.35, blue: 0.42, alpha: 1).cgColor
                 row.addSubview(rail)
-                // Horizontal stub
-                let stub = NSView(frame: NSRect(x: 12, y: rowH / 2 - 1, width: 14, height: 2))
+                let stub = NSView(frame: NSRect(x: 13, y: rowH / 2 - 1, width: 12, height: 2))
                 stub.wantsLayer = true
                 stub.layer?.backgroundColor =
                     NSColor(calibratedRed: 0.35, green: 0.35, blue: 0.42, alpha: 1).cgColor
                 row.addSubview(stub)
 
-                // Worker node
-                let node = NSView(frame: NSRect(x: 28, y: 10, width: 10, height: 10))
-                node.wantsLayer = true
-                node.layer?.backgroundColor =
-                    NSColor(calibratedRed: 0.85, green: 0.45, blue: 0.30, alpha: 1).cgColor
-                node.layer?.cornerRadius = 5
-                row.addSubview(node)
-
+                let wCols = TerminalTheme.Colors.from(w["colors"]) ?? .workerDefault
+                let wNS = wCols.asNSColors
                 let tag = "\(name)|\(wid)"
-                row.addSubview(Self.label("\(branch) \(wid) \(lab)",
-                    frame: NSRect(x: 42, y: 7, width: 130, height: 18), size: 11, secondary: false))
+                row.addSubview(swatchButton(
+                    color: wNS.hi,
+                    frame: NSRect(x: 28, y: 10, width: 12, height: 12),
+                    id: tag,
+                    action: #selector(workerColorPressed(_:))
+                ))
+                row.addSubview(nameButton(
+                    "\(branch) \(lab)",
+                    frame: NSRect(x: 44, y: 5, width: 124, height: 24),
+                    id: tag,
+                    action: #selector(workerNamePressed(_:))
+                ))
                 row.addSubview(button("Front", #selector(frontWorkerPressed(_:)),
-                    NSRect(x: 178, y: 4, width: 48, height: 24), id: tag))
+                    NSRect(x: 172, y: 5, width: 46, height: 24), id: tag))
                 row.addSubview(button("Kill", #selector(killWorkerPressed(_:)),
-                    NSRect(x: 228, y: 4, width: 44, height: 24), id: tag))
+                    NSRect(x: 220, y: 5, width: 42, height: 24), id: tag))
                 let wperms = Workers.permissions(pair: name, workerId: wid)
                 let won = ["ban_mcp", "ban_root", "ban_network", "ban_system_paths", "repo_only"]
                     .filter { (wperms[$0] as? Bool) == true }.count
                 let wnote = !((wperms["custom_prompt"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 let wtitle = (won > 0 || wnote) ? "Perms·\(won + (wnote ? 1 : 0))" : "Perms"
                 row.addSubview(button(wtitle, #selector(permsWorkerPressed(_:)),
-                    NSRect(x: 274, y: 4, width: 78, height: 24), id: tag))
+                    NSRect(x: 264, y: 5, width: 72, height: 24), id: tag))
                 listContainer.addSubview(row)
             }
             y -= 10
         }
+    }
+
+    private func nameButton(_ title: String, frame: NSRect, id: String, action: Selector) -> NSButton {
+        let b = NSButton(frame: frame)
+        b.title = title
+        b.bezelStyle = .inline
+        b.isBordered = false
+        b.alignment = .left
+        b.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        b.contentTintColor = NSColor(calibratedWhite: 0.92, alpha: 1)
+        b.target = self
+        b.action = action
+        b.identifier = NSUserInterfaceItemIdentifier(id)
+        b.toolTip = "Click to rename"
+        return b
+    }
+
+    private func swatchButton(color: NSColor, frame: NSRect, id: String, action: Selector) -> NSButton {
+        let b = NSButton(frame: frame)
+        b.title = ""
+        b.bezelStyle = .shadowlessSquare
+        b.isBordered = false
+        b.wantsLayer = true
+        b.layer?.backgroundColor = color.cgColor
+        b.layer?.cornerRadius = frame.height / 2
+        b.layer?.borderWidth = 1
+        b.layer?.borderColor = NSColor(calibratedWhite: 1, alpha: 0.25).cgColor
+        b.target = self
+        b.action = action
+        b.identifier = NSUserInterfaceItemIdentifier(id)
+        b.toolTip = "Colors: background, text, highlight"
+        return b
     }
 
     // MARK: Actions
@@ -1819,6 +2052,70 @@ final class PanelController: NSObject {
             self?.refreshUI()
         }
     }
+
+    @objc private func hermesNamePressed(_ sender: NSButton) {
+        guard let pair = sender.identifier?.rawValue else { return }
+        let entry = PairState.loadPairsDb()[pair] as? [String: Any] ?? [:]
+        let current = (entry["display_name"] as? String) ?? pair
+        promptName(title: "Name this pair", value: current) { name in
+            Workers.setPairDisplayName(pair, name)
+            self.refreshUI()
+        }
+    }
+
+    @objc private func workerNamePressed(_ sender: NSButton) {
+        guard let tag = sender.identifier?.rawValue else { return }
+        let parts = tag.split(separator: "|", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return }
+        let entry = PairState.loadPairsDb()[parts[0]] as? [String: Any] ?? [:]
+        let ws = Workers.list(from: entry)
+        let cur = (ws.first(where: { ($0["id"] as? String) == parts[1] })?["label"] as? String) ?? parts[1]
+        promptName(title: "Name worker \(parts[1])", value: cur) { name in
+            Workers.setWorkerLabel(pair: parts[0], workerId: parts[1], label: name)
+            self.refreshUI()
+        }
+    }
+
+    @objc private func hermesColorPressed(_ sender: NSButton) {
+        guard let pair = sender.identifier?.rawValue else { return }
+        let entry = PairState.loadPairsDb()[pair] as? [String: Any] ?? [:]
+        let cols = TerminalTheme.Colors.from(entry["colors"]) ?? .hermesDefault
+        ColorThemeSheet.shared.show(title: "Hermes colors · \(pair)", colors: cols) { [weak self] c in
+            Workers.setPairColors(pair, colors: c)
+            self?.refreshUI()
+        }
+    }
+
+    @objc private func workerColorPressed(_ sender: NSButton) {
+        guard let tag = sender.identifier?.rawValue else { return }
+        let parts = tag.split(separator: "|", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return }
+        let entry = PairState.loadPairsDb()[parts[0]] as? [String: Any] ?? [:]
+        let ws = Workers.list(from: entry)
+        let w = ws.first(where: { ($0["id"] as? String) == parts[1] }) ?? [:]
+        let cols = TerminalTheme.Colors.from(w["colors"]) ?? .workerDefault
+        ColorThemeSheet.shared.show(title: "Colors · \(parts[1])", colors: cols) { [weak self] c in
+            Workers.setWorkerColors(pair: parts[0], workerId: parts[1], colors: c)
+            self?.refreshUI()
+        }
+    }
+
+    private func promptName(title: String, value: String, onOK: @escaping (String) -> Void) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = "Shows in the panel and at the top of that Terminal window."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = value
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty { onOK(name) }
+    }
+
 
     @objc private func refreshPressed(_ sender: NSButton) { refreshUI() }
 
@@ -1923,6 +2220,100 @@ enum PermissionPresets {
 }
 
 // MARK: - Per-pair access permissions sheet
+
+
+// MARK: - Color theme sheet (bg / text / highlight)
+
+final class ColorThemeSheet: NSObject {
+    static let shared = ColorThemeSheet()
+    private var window: NSWindow?
+    private var bgWell: NSColorWell!
+    private var textWell: NSColorWell!
+    private var hiWell: NSColorWell!
+    private var onSave: ((TerminalTheme.Colors) -> Void)?
+
+    func show(title: String, colors: TerminalTheme.Colors, onSave: @escaping (TerminalTheme.Colors) -> Void) {
+        self.onSave = onSave
+        if window == nil { build() }
+        window?.title = title
+        let ns = colors.asNSColors
+        bgWell.color = ns.bg
+        textWell.color = ns.text
+        hiWell.color = ns.hi
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        window?.center()
+    }
+
+    private func build() {
+        let W: CGFloat = 360, H: CGFloat = 240
+        let win = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: W, height: H),
+            styleMask: [.titled, .closable],
+            backing: .buffered, defer: false)
+        win.isReleasedWhenClosed = false
+        win.level = .floating
+        win.backgroundColor = NSColor(calibratedRed: 0.07, green: 0.07, blue: 0.08, alpha: 1)
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+
+        func row(_ label: String, y: CGFloat) -> NSColorWell {
+            let l = NSTextField(labelWithString: label)
+            l.frame = NSRect(x: 24, y: y, width: 120, height: 20)
+            l.textColor = NSColor(calibratedWhite: 0.85, alpha: 1)
+            l.font = NSFont.systemFont(ofSize: 13)
+            content.addSubview(l)
+            let well = NSColorWell(frame: NSRect(x: 160, y: y - 4, width: 160, height: 28))
+            well.isBordered = true
+            content.addSubview(well)
+            return well
+        }
+        var y: CGFloat = H - 48
+        let hint = NSTextField(labelWithString: "Applied to that Terminal window.")
+        hint.frame = NSRect(x: 24, y: y, width: W - 48, height: 18)
+        hint.textColor = NSColor(calibratedWhite: 0.55, alpha: 1)
+        hint.font = NSFont.systemFont(ofSize: 11)
+        content.addSubview(hint)
+        y -= 40
+        bgWell = row("Background", y: y)
+        y -= 40
+        textWell = row("Text", y: y)
+        y -= 40
+        hiWell = row("Highlight", y: y)
+
+        let apply = NSButton(frame: NSRect(x: W - 24 - 100, y: 16, width: 100, height: 32))
+        apply.title = "Apply"
+        apply.bezelStyle = .rounded
+        apply.target = self
+        apply.action = #selector(applyPressed)
+        content.addSubview(apply)
+        let cancel = NSButton(frame: NSRect(x: W - 24 - 100 - 90, y: 16, width: 80, height: 32))
+        cancel.title = "Cancel"
+        cancel.bezelStyle = .rounded
+        cancel.target = self
+        cancel.action = #selector(cancelPressed)
+        content.addSubview(cancel)
+
+        win.contentView = content
+        window = win
+    }
+
+    @objc private func cancelPressed() { window?.orderOut(nil) }
+
+    @objc private func applyPressed() {
+        func trip(_ c: NSColor) -> (CGFloat, CGFloat, CGFloat) {
+            let x = c.usingColorSpace(.deviceRGB) ?? c
+            return (x.redComponent, x.greenComponent, x.blueComponent)
+        }
+        let cols = TerminalTheme.Colors(
+            bg: trip(bgWell.color),
+            text: trip(textWell.color),
+            highlight: trip(hiWell.color)
+        )
+        window?.orderOut(nil)
+        onSave?(cols)
+    }
+}
+
 
 /// Modal sheet: tick ban boxes + freeform prompt. Stored on the pair in pairs.json
 /// and mirrored into active-pair.json so claude-delegate can inject constraints.
