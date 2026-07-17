@@ -424,15 +424,18 @@ enum Pairing {
         var list = workers
         if list.isEmpty { list = [WorkerType.named("claude")] }
         let name = PairState.nextPairName()
+        let pathExport = "export PATH=/opt/homebrew/bin:/usr/local/bin:$HOME/bin:$HOME/.local/bin:$PATH"
         let viewH = "\(name)-h"
+
         var toKill = [name, viewH, "\(name)-c"]
-        for i in 0..<max(list.count, 4) { toKill.append("\(name)-w\(i)") }
+        for i in 0..<max(list.count, 8) { toKill.append("\(name)-w\(i)") }
         for s in toKill {
             Pong.sh("tmux has-session -t \(s) 2>/dev/null && tmux kill-session -t \(s) || true")
         }
+
         Pong.sh("tmux new-session -d -s \(name) -n Hermes")
-        Pong.sh("tmux send-keys -t \(name):0 -l 'printf \"\\n  HERMES · \(name):0\\n\\n\"; hermes'")
-        usleep(50_000)
+        Pong.sh("tmux send-keys -t \(name):0 -l '\(pathExport); printf \"\\n  HERMES · \(name):0\\n\\n\"; hermes'")
+        usleep(80_000)
         Pong.sh("tmux send-keys -t \(name):0 Enter")
 
         var workerRecords: [[String: Any]] = []
@@ -443,8 +446,8 @@ enum Pairing {
             Pong.sh("tmux new-window -t \(name) -n \(winName)")
             let safeCmd = launchCmd.replacingOccurrences(of: "'", with: "'\\''")
             let banner = "WORKER · \(worker.label) · \(name):\(idx + 1)"
-            Pong.sh("tmux send-keys -t \(name):\(idx + 1) -l 'printf \"\\n  \(banner)\\n\\n\"; \(safeCmd)'")
-            usleep(50_000)
+            Pong.sh("tmux send-keys -t \(name):\(idx + 1) -l '\(pathExport); printf \"\\n  \(banner)\\n\\n\"; \(safeCmd)'")
+            usleep(80_000)
             Pong.sh("tmux send-keys -t \(name):\(idx + 1) Enter")
             workerRecords.append([
                 "id": "w\(idx + 1)",
@@ -466,35 +469,35 @@ enum Pairing {
             Pong.sh("tmux new-session -d -s \(vn) -t \(name)")
             Pong.sh("tmux select-window -t \(vn):\(idx + 1)")
         }
-        if let first = viewNames.first {
+        if !viewNames.isEmpty {
             Pong.sh("tmux has-session -t \(name)-c 2>/dev/null || tmux new-session -d -s \(name)-c -t \(name)")
             Pong.sh("tmux select-window -t \(name)-c:1")
-            _ = first
         }
 
-        var ascript = """
-        tell application "Terminal"
-          activate
-          do script "tmux attach-session -t \(viewH)"
-          delay 0.4
-          set idH to id of front window as string
-          set acc to idH
-"""
-        for vn in viewNames {
-            ascript += """
-          do script "tmux attach-session -t \(vn)"
-          delay 0.4
-          set acc to acc & "," & (id of front window as string)
-"""
+        // Open Terminals one-by-one with full PATH (GUI Terminal often lacks homebrew).
+        func openAttach(_ session: String) -> String? {
+            let script = """
+            tell application "Terminal"
+              activate
+              do script "\(pathExport); tmux attach-session -t \(session)"
+              delay 0.55
+              try
+                return id of front window as string
+              on error
+                return ""
+              end try
+            end tell
+            """
+            let out = Pong.osascript(script).trimmingCharacters(in: .whitespacesAndNewlines)
+            Pong.log("openAttach \(session) → \(out.isEmpty ? "(empty)" : out)")
+            return out.isEmpty ? nil : out
         }
-        ascript += """
-          return acc
-        end tell
-"""
-        let out = Pong.osascript(ascript)
-        let parts = out.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
-        let hid = parts.first
-        var windowIds = Array(parts.dropFirst())
+
+        let hid = openAttach(viewH)
+        var windowIds: [String] = []
+        for vn in viewNames {
+            windowIds.append(openAttach(vn) ?? "")
+        }
         while windowIds.count < workerRecords.count { windowIds.append("") }
         for i in 0..<workerRecords.count {
             if i < windowIds.count, Int(windowIds[i]) != nil {
@@ -503,7 +506,8 @@ enum Pairing {
                 workerRecords[i]["window_id"] = NSNull()
             }
         }
-        let primaryWid = windowIds.first
+        let primaryWid = windowIds.first(where: { Int($0) != nil })
+        let teamLabel = list.count == 1 ? list[0].label : "\(list.count) workers"
 
         PairState.savePairState(
             name,
@@ -511,7 +515,7 @@ enum Pairing {
             claudeWindowId: primaryWid,
             claudeMode: "tmux",
             workerType: list[0].id,
-            workerLabel: list.count == 1 ? list[0].label : "\(list.count) workers",
+            workerLabel: teamLabel,
             workerCmd: list[0].cmd.isEmpty ? "claude" : list[0].cmd,
             workers: workerRecords
         )
@@ -524,6 +528,8 @@ enum Pairing {
         active["hermes_window_id"] = hid ?? NSNull() as Any
         active["claude_window_id"] = primaryWid ?? NSNull() as Any
         active["claude_mode"] = "tmux"
+        active["worker_type"] = list[0].id
+        active["worker_label"] = teamLabel
         active["updated"] = Date().timeIntervalSince1970
         Pong.writeJSON(PairState.activePath, active)
         var db = PairState.loadPairsDb()
@@ -532,13 +538,20 @@ enum Pairing {
         entry["view_claude"] = viewNames.first ?? "\(name)-c"
         entry["view_workers"] = viewNames
         entry["workers"] = workerRecords
+        entry["hermes_window_id"] = hid ?? NSNull() as Any
+        entry["claude_window_id"] = primaryWid ?? NSNull() as Any
         entry["updated"] = Date().timeIntervalSince1970
         db[name] = entry
         Pong.writeJSON(PairState.pairsPath, db)
 
-        if let h = hid { flashPairWindows(h, primaryWid) }
+        if let h = hid {
+            flashPairWindows(h, primaryWid)
+        } else {
+            Pong.osascript("tell application \"Terminal\" to activate")
+            Pong.log("start_fresh WARNING: no hermes window id — check Automation permission for Terminal")
+        }
         let labels = list.map { $0.label }.joined(separator: ", ")
-        Pong.log("start_fresh \(name) workers=[\(labels)] hermes=\(hid ?? "-")")
+        Pong.log("start_fresh \(name) workers=[\(labels)] hermes=\(hid ?? "-") primaryWorker=\(primaryWid ?? "-")")
         Tips.afterSuccessfulPair()
         return name
     }
@@ -1139,7 +1152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         return "● \(s)  →  \(lab)"
                     }
                     let labs = ws.map { ($0["id"] as? String) ?? "?" }.joined(separator: "+")
-                    return "● \(s)  →  army [\(labs)]"
+                    return "● \(s)  →  team [\(labs)]"
                 }()
                 let sub = NSMenu()
                 let rejoin = NSMenuItem(title: "Bring to front", action: #selector(rejoinNamed(_:)), keyEquivalent: "")
@@ -1237,10 +1250,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "Always one Hermes window.\n\n" +
             "• Claude only — fastest (1 worker)\n" +
             "• Choose one worker — Kimi, Grok, Codex, …\n" +
-            "• Army — several workers under the same Hermes (one Active pair row)"
+            "• Team — several workers under the same Hermes (one Active pair row)"
         gate.addButton(withTitle: "Claude only")
         gate.addButton(withTitle: "Choose one…")
-        gate.addButton(withTitle: "Army…")
+        gate.addButton(withTitle: "Team…")
         gate.addButton(withTitle: "Cancel")
         let g = gate.runModal()
         let first = NSApplication.ModalResponse.alertFirstButtonReturn
@@ -1251,7 +1264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return pickOneWorker().map { [$0] }
         }
         if g == NSApplication.ModalResponse(rawValue: first.rawValue + 2) {
-            return pickArmyWorkers()
+            return pickTeamWorkers()
         }
         return nil
     }
@@ -1293,25 +1306,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Army: N workers under ONE Hermes when Done.
-    static func pickArmyWorkers() -> [WorkerType]? {
+    static func pickTeamWorkers() -> [WorkerType]? {
         var selected: [WorkerType] = []
         while true {
             let alert = NSAlert()
             if selected.isEmpty {
-                alert.messageText = "Army — same Hermes"
+                alert.messageText = "Team — same Hermes"
                 alert.informativeText =
                     "Add workers one by one. They all belong to ONE Hermes session (one Active pair row).\n" +
                     "Not separate pairs."
             } else {
                 let names = selected.enumerated().map { "w\($0.offset + 1)=\($0.element.label)" }.joined(separator: ", ")
-                alert.messageText = "Army so far (\(selected.count))"
+                alert.messageText = "Team so far (\(selected.count))"
                 alert.informativeText = "\(names)\n\nAdd another, or Done to open Hermes + these workers together."
             }
             let choices = WorkerType.all.filter { $0.id != "custom" }
             for w in choices { alert.addButton(withTitle: "+ \(w.label)") }
             alert.addButton(withTitle: "+ Custom…")
             if !selected.isEmpty {
-                alert.addButton(withTitle: "Done — launch army")
+                alert.addButton(withTitle: "Done — launch team")
             }
             alert.addButton(withTitle: "Cancel")
             let resp = alert.runModal()
@@ -1483,7 +1496,7 @@ final class PanelController: NSObject {
         content.addSubview(button("New pair", #selector(newPairPressed(_:)),
             NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 38)))
         y -= 36
-        content.addSubview(Self.label("One Hermes always. Claude only, one worker, or an army — still one Active pair row.",
+        content.addSubview(Self.label("One Hermes always. Claude only, one worker, or a team — still one Active pair row.",
             frame: NSRect(x: PAD + 2, y: y, width: W - 2 * PAD - 4, height: 32), size: 12, secondary: true))
         y -= 48
         content.addSubview(button("Link existing terminals", #selector(linkPressed(_:)),
@@ -2090,7 +2103,7 @@ final class LinkGuideController: NSObject {
             contentRect: NSRect(x: 0, y: 0, width: GW, height: GH),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
-        win.title = "Hermes Pong — Link army"
+        win.title = "Hermes Pong — Link team"
         win.level = .floating
         win.isReleasedWhenClosed = false
         win.backgroundColor = NSColor(calibratedRed: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
