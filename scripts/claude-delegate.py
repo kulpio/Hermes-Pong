@@ -77,6 +77,13 @@ def format_permissions_block(state: dict) -> str:
     if not perms:
         return ""
     lines: list[str] = []
+    if perms.get("ask_each"):
+        lines.append(
+            "- ASK BEFORE ELEVATED ACCESS: Before using MCP tools, network/installs, "
+            "files outside the project, system paths (~/.ssh, /etc, keychains), sudo/root, "
+            "or destructive shell, STOP and ask me in this chat. Wait for an explicit yes "
+            "for that specific action. One yes does not unlock the rest."
+        )
     if perms.get("ban_mcp"):
         lines.append("- Do NOT use MCP tools or external tool servers.")
     if perms.get("ban_root"):

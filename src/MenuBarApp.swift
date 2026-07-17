@@ -116,8 +116,25 @@ enum PairState {
             "ban_network": false,
             "ban_system_paths": false,
             "repo_only": false,
+            "ask_each": false,
             "custom_prompt": "",
         ]
+    }
+
+    /// Full access preset: no bans, no ask gate.
+    static func fullAccessPermissions() -> [String: Any] {
+        defaultPermissions()
+    }
+
+    /// Ask-each-time preset: Claude must request elevated access in chat first.
+    static func askEachPermissions() -> [String: Any] {
+        var p = defaultPermissions()
+        p["ask_each"] = true
+        p["custom_prompt"] =
+            "Before any elevated action, ask me in this chat and wait for a clear yes. " +
+            "Elevated = MCP tools, network/installs, files outside the project, system paths " +
+            "(~/.ssh, /etc, keychains), sudo/root, or destructive shell. One yes does not unlock the rest."
+        return p
     }
 
     static func permissions(for session: String) -> [String: Any] {
@@ -1094,6 +1111,79 @@ final class PanelController: NSObject {
     }
 }
 
+// MARK: - Saved permission presets (~/.hermes-pong/permission-presets.json)
+
+/// Built-in + user-saved permission packs. Builtins are always available; user
+/// packs are named snapshots of the checkbox/note set.
+enum PermissionPresets {
+    static var path: String { Pong.stateDir + "/permission-presets.json" }
+
+    struct Item {
+        let id: String
+        let name: String
+        let builtin: Bool
+        let permissions: [String: Any]
+    }
+
+    static func builtins() -> [Item] {
+        [
+            Item(id: "full", name: "Full access", builtin: true,
+                 permissions: PairState.fullAccessPermissions()),
+            Item(id: "ask_each", name: "Ask each time", builtin: true,
+                 permissions: PairState.askEachPermissions()),
+        ]
+    }
+
+    static func loadUser() -> [Item] {
+        let raw = Pong.loadJSON(path)
+        let arr = (raw["presets"] as? [[String: Any]]) ?? []
+        var out: [Item] = []
+        for row in arr {
+            guard let id = row["id"] as? String,
+                  let name = row["name"] as? String,
+                  let perms = row["permissions"] as? [String: Any] else { continue }
+            // Never shadow builtins
+            if id == "full" || id == "ask_each" { continue }
+            out.append(Item(id: id, name: name, builtin: false, permissions: perms))
+        }
+        return out.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    static func all() -> [Item] { builtins() + loadUser() }
+
+    static func saveUser(name: String, permissions: [String: Any]) -> Item {
+        var trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { trimmed = "My preset" }
+        var list = loadUser()
+        let id: String
+        if let existing = list.first(where: { $0.name.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            id = existing.id
+            list.removeAll { $0.id == id }
+        } else {
+            id = "user-\(Int(Date().timeIntervalSince1970))-\(Int.random(in: 100...999))"
+        }
+        let item = Item(id: id, name: trimmed, builtin: false, permissions: permissions)
+        list.append(item)
+        writeUser(list)
+        Pong.log("permission preset saved id=\(id) name=\(trimmed)")
+        return item
+    }
+
+    static func deleteUser(id: String) {
+        if id == "full" || id == "ask_each" { return }
+        let list = loadUser().filter { $0.id != id }
+        writeUser(list)
+        Pong.log("permission preset deleted id=\(id)")
+    }
+
+    private static func writeUser(_ list: [Item]) {
+        let arr: [[String: Any]] = list.map {
+            ["id": $0.id, "name": $0.name, "permissions": $0.permissions]
+        }
+        Pong.writeJSON(path, ["presets": arr, "updated": Date().timeIntervalSince1970])
+    }
+}
+
 // MARK: - Per-pair access permissions sheet
 
 /// Modal sheet: tick ban boxes + freeform prompt. Stored on the pair in pairs.json
@@ -1106,6 +1196,8 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
     private var onSaved: (() -> Void)?
     private var boxes: [String: NSButton] = [:]
     private var noteView: NSTextView!
+    private var presetStatus: NSTextField!
+    private var contentRoot: NSView!
 
     private let keys: [(String, String)] = [
         ("ban_mcp", "Ban MCP tools / external tool servers"),
@@ -1113,6 +1205,7 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
         ("repo_only", "Repo-only (stay inside the project tree)"),
         ("ban_network", "Ban network installs / outbound fetches"),
         ("ban_system_paths", "Ban system paths (~/.ssh, /etc, keychains)"),
+        ("ask_each", "Ask in chat before each elevated permission"),
     ]
 
     func show(for name: String, onSaved: @escaping () -> Void) {
@@ -1126,7 +1219,7 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
     }
 
     private func buildWindow() {
-        let W: CGFloat = 440, H: CGFloat = 460
+        let W: CGFloat = 460, H: CGFloat = 560
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: W, height: H),
             styleMask: [.titled, .closable],
@@ -1138,6 +1231,7 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
         win.level = .floating
 
         let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+        contentRoot = content
         let PAD: CGFloat = 22
         var y = H - PAD - 8
 
@@ -1148,24 +1242,60 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
         y -= 28
 
         let sub = NSTextField(wrappingLabelWithString:
-            "Checked boxes ban that access for Claude on every handoff. Optional note explains or tightens further.")
+            "Checked boxes ban that access on every handoff. “Ask each time” makes Claude request elevated access in chat first. Save a preset once, reuse it on any pair.")
         sub.font = .systemFont(ofSize: 12)
         sub.textColor = .secondaryLabelColor
-        sub.frame = NSRect(x: PAD, y: y - 40, width: W - 2 * PAD, height: 40)
+        sub.frame = NSRect(x: PAD, y: y - 48, width: W - 2 * PAD, height: 48)
         content.addSubview(sub)
-        y -= 52
+        y -= 56
+
+        // Preset bar
+        let presetLbl = NSTextField(labelWithString: "PRESETS")
+        presetLbl.font = .systemFont(ofSize: 10)
+        presetLbl.textColor = .secondaryLabelColor
+        presetLbl.frame = NSRect(x: PAD, y: y - 14, width: 80, height: 14)
+        content.addSubview(presetLbl)
+        y -= 20
+
+        let btnH: CGFloat = 28
+        let gap: CGFloat = 8
+        let fullW: CGFloat = 108
+        let askW: CGFloat = 118
+        let loadW: CGFloat = 100
+        let saveAsW: CGFloat = 88
+        var x = PAD
+        content.addSubview(makeButton("Full access", #selector(applyFullPreset),
+            NSRect(x: x, y: y - btnH, width: fullW, height: btnH)))
+        x += fullW + gap
+        content.addSubview(makeButton("Ask each time", #selector(applyAskPreset),
+            NSRect(x: x, y: y - btnH, width: askW, height: btnH)))
+        x += askW + gap
+        content.addSubview(makeButton("Load saved…", #selector(loadSavedPreset),
+            NSRect(x: x, y: y - btnH, width: loadW, height: btnH)))
+        x += loadW + gap
+        content.addSubview(makeButton("Save as…", #selector(saveAsPreset),
+            NSRect(x: x, y: y - btnH, width: saveAsW, height: btnH)))
+        y -= btnH + 6
+
+        presetStatus = NSTextField(labelWithString: "")
+        presetStatus.font = .systemFont(ofSize: 11)
+        presetStatus.textColor = .secondaryLabelColor
+        presetStatus.frame = NSRect(x: PAD, y: y - 16, width: W - 2 * PAD, height: 16)
+        content.addSubview(presetStatus)
+        y -= 24
 
         boxes.removeAll()
         for (key, label) in keys {
-            let b = NSButton(checkboxWithTitle: label, target: nil, action: nil)
+            let b = NSButton(checkboxWithTitle: label, target: self, action: #selector(boxChanged(_:)))
             b.frame = NSRect(x: PAD, y: y - 24, width: W - 2 * PAD, height: 24)
             b.font = .systemFont(ofSize: 13)
+            b.identifier = NSUserInterfaceItemIdentifier(key)
             content.addSubview(b)
             boxes[key] = b
             y -= 28
         }
 
-        y -= 8
+        y -= 6
         let noteLbl = NSTextField(labelWithString: "Extra note (injected into Claude)")
         noteLbl.font = .systemFont(ofSize: 11)
         noteLbl.textColor = .secondaryLabelColor
@@ -1173,7 +1303,7 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
         content.addSubview(noteLbl)
         y -= 22
 
-        let scrollH: CGFloat = 110
+        let scrollH: CGFloat = 96
         let scroll = NSScrollView(frame: NSRect(x: PAD, y: y - scrollH, width: W - 2 * PAD, height: scrollH))
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
@@ -1190,45 +1320,164 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
         noteView = tv
         y -= scrollH + 18
 
-        let save = NSButton(frame: NSRect(x: W - PAD - 100, y: 18, width: 100, height: 32))
-        save.title = "Save"
-        save.bezelStyle = .rounded
+        let save = makeButton("Save to pair", #selector(savePressed),
+            NSRect(x: W - PAD - 120, y: 18, width: 120, height: 32))
         save.keyEquivalent = "\r"
-        save.target = self
-        save.action = #selector(savePressed)
         content.addSubview(save)
 
-        let cancel = NSButton(frame: NSRect(x: W - PAD - 210, y: 18, width: 100, height: 32))
-        cancel.title = "Cancel"
-        cancel.bezelStyle = .rounded
+        let cancel = makeButton("Cancel", #selector(cancelPressed),
+            NSRect(x: W - PAD - 230, y: 18, width: 100, height: 32))
         cancel.keyEquivalent = "\u{1b}"
-        cancel.target = self
-        cancel.action = #selector(cancelPressed)
         content.addSubview(cancel)
 
-        let clear = NSButton(frame: NSRect(x: PAD, y: 18, width: 90, height: 32))
-        clear.title = "Clear all"
-        clear.bezelStyle = .rounded
-        clear.target = self
-        clear.action = #selector(clearPressed)
-        content.addSubview(clear)
+        content.addSubview(makeButton("Clear all", #selector(clearPressed),
+            NSRect(x: PAD, y: 18, width: 90, height: 32)))
 
         win.contentView = content
         window = win
     }
 
+    private func makeButton(_ title: String, _ sel: Selector, _ frame: NSRect) -> NSButton {
+        let b = NSButton(frame: frame)
+        b.title = title
+        b.bezelStyle = .rounded
+        b.target = self
+        b.action = sel
+        return b
+    }
+
+    private func currentPermissionsFromUI() -> [String: Any] {
+        var perms = PairState.defaultPermissions()
+        for (key, box) in boxes {
+            perms[key] = (box.state == .on)
+        }
+        perms["custom_prompt"] = noteView?.string ?? ""
+        return perms
+    }
+
+    private func applyPermissionsToUI(_ perms: [String: Any], status: String) {
+        var merged = PairState.defaultPermissions()
+        for (k, v) in perms { merged[k] = v }
+        for (key, box) in boxes {
+            box.state = ((merged[key] as? Bool) == true) ? .on : .off
+        }
+        noteView?.string = (merged["custom_prompt"] as? String) ?? ""
+        presetStatus?.stringValue = status
+    }
+
     private func loadIntoUI() {
         window?.title = "Permissions · \(pairName)"
         let perms = PairState.permissions(for: pairName)
-        for (key, box) in boxes {
-            box.state = ((perms[key] as? Bool) == true) ? .on : .off
+        applyPermissionsToUI(perms, status: matchStatus(for: perms))
+    }
+
+    private func matchStatus(for perms: [String: Any]) -> String {
+        for item in PermissionPresets.all() {
+            if permissionsEqual(item.permissions, perms) {
+                return item.builtin ? "Preset: \(item.name)" : "Saved: \(item.name)"
+            }
         }
-        noteView?.string = (perms["custom_prompt"] as? String) ?? ""
+        return "Custom for this pair"
+    }
+
+    private func permissionsEqual(_ a: [String: Any], _ b: [String: Any]) -> Bool {
+        let keys = ["ban_mcp", "ban_root", "ban_network", "ban_system_paths", "repo_only", "ask_each"]
+        for k in keys {
+            let av = (a[k] as? Bool) ?? false
+            let bv = (b[k] as? Bool) ?? false
+            if av != bv { return false }
+        }
+        let an = ((a["custom_prompt"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let bn = ((b["custom_prompt"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return an == bn
+    }
+
+    @objc private func boxChanged(_ sender: NSButton) {
+        presetStatus?.stringValue = "Custom for this pair"
+    }
+
+    func textDidChange(_ notification: Notification) {
+        presetStatus?.stringValue = "Custom for this pair"
+    }
+
+    @objc private func applyFullPreset() {
+        applyPermissionsToUI(PairState.fullAccessPermissions(), status: "Preset: Full access")
+    }
+
+    @objc private func applyAskPreset() {
+        applyPermissionsToUI(PairState.askEachPermissions(), status: "Preset: Ask each time")
+    }
+
+    @objc private func loadSavedPreset() {
+        let users = PermissionPresets.loadUser()
+        if users.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = "No saved presets yet"
+            alert.informativeText = "Tune the checkboxes/note, then hit Save as… to keep a named pack."
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Load saved preset"
+        alert.informativeText = "Applies into this sheet. Hit Save to pair to stick it on \(pairName)."
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 280, height: 26), pullsDown: false)
+        for item in users {
+            popup.addItem(withTitle: item.name)
+            popup.lastItem?.representedObject = item.id
+        }
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "Load")
+        alert.addButton(withTitle: "Delete selected")
+        alert.addButton(withTitle: "Cancel")
+        let resp = alert.runModal()
+        let first = NSApplication.ModalResponse.alertFirstButtonReturn
+        guard let id = popup.selectedItem?.representedObject as? String,
+              let item = users.first(where: { $0.id == id }) else { return }
+        if resp == first {
+            applyPermissionsToUI(item.permissions, status: "Saved: \(item.name)")
+        } else if resp == NSApplication.ModalResponse(rawValue: first.rawValue + 1) {
+            let confirm = NSAlert()
+            confirm.messageText = "Delete “\(item.name)”?"
+            confirm.informativeText = "This only removes the saved pack. Pair settings stay until you change them."
+            confirm.addButton(withTitle: "Delete")
+            confirm.addButton(withTitle: "Cancel")
+            if confirm.runModal() == .alertFirstButtonReturn {
+                PermissionPresets.deleteUser(id: id)
+                presetStatus?.stringValue = "Deleted saved preset “\(item.name)”"
+            }
+        }
+    }
+
+    @objc private func saveAsPreset() {
+        let alert = NSAlert()
+        alert.messageText = "Save permission preset"
+        alert.informativeText = "Name this pack. Same name overwrites an existing saved preset."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = suggestedPresetName()
+        field.placeholderString = "e.g. Strict lab, Client work"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save preset")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let item = PermissionPresets.saveUser(name: field.stringValue, permissions: currentPermissionsFromUI())
+        presetStatus?.stringValue = "Saved: \(item.name)"
+    }
+
+    private func suggestedPresetName() -> String {
+        let p = currentPermissionsFromUI()
+        if permissionsEqual(p, PairState.fullAccessPermissions()) { return "Full access copy" }
+        if permissionsEqual(p, PairState.askEachPermissions()) { return "Ask each time copy" }
+        if (p["ask_each"] as? Bool) == true { return "Ask-first custom" }
+        let bans = ["ban_mcp", "ban_root", "ban_network", "ban_system_paths", "repo_only"]
+            .filter { (p[$0] as? Bool) == true }
+        if bans.isEmpty { return "My preset" }
+        return "Strict (\(bans.count) bans)"
     }
 
     @objc private func clearPressed() {
-        for box in boxes.values { box.state = .off }
-        noteView?.string = ""
+        applyPermissionsToUI(PairState.defaultPermissions(), status: "Custom for this pair")
     }
 
     @objc private func cancelPressed() {
@@ -1236,11 +1485,7 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
     }
 
     @objc private func savePressed() {
-        var perms = PairState.defaultPermissions()
-        for (key, box) in boxes {
-            perms[key] = (box.state == .on)
-        }
-        perms["custom_prompt"] = noteView?.string ?? ""
+        let perms = currentPermissionsFromUI()
         let prev = PairState.loadPairsDb()[pairName] as? [String: Any] ?? [:]
         PairState.savePairState(
             pairName,
@@ -1255,7 +1500,7 @@ final class PermissionsSheetController: NSObject, NSWindowDelegate, NSTextViewDe
     }
 
     func windowWillClose(_ notification: Notification) {
-        // no-op; isReleasedWhenClosed = false
+        // isReleasedWhenClosed = false
     }
 }
 
