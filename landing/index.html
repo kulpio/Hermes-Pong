@@ -54,23 +54,13 @@
       gap: 14px;
       min-width: 0;
     }
-    header .logo-tile {
-      width: 52px;
-      height: 52px;
-      border-radius: 14px;
-      background: linear-gradient(145deg, #0f0f14, #1a1a22);
-      border: 1px solid rgba(38, 2, 241, 0.18);
-      box-shadow: 0 6px 18px rgba(20, 20, 30, 0.08);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-    }
-    header .logo-tile img {
-      width: 36px;
-      height: 36px;
-      border-radius: 9px;
+    header img.logo {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
       display: block;
+      flex-shrink: 0;
+      background: transparent;
     }
     header .brand {
       font-weight: 750;
@@ -371,9 +361,7 @@
   <div class="wrap">
     <header>
       <div class="brand-block">
-        <div class="logo-tile">
-          <img src="logo.png" alt="Hermes Pong" />
-        </div>
+        <img class="logo" src="logo.png" alt="Hermes Pong" />
         <div>
           <div class="brand">Hermes Pong</div>
           <div class="sub">macOS · Terminal · Hermes ↔ Claude Code</div>
