@@ -74,6 +74,25 @@ enum Pong {
         return out
     }
 
+    /// Prefer for Terminal UI changes (titles/colors). Uses app Automation TCC properly.
+    @discardableResult
+    static func appleScript(_ source: String) -> String {
+        var error: NSDictionary?
+        guard let script = NSAppleScript(source: source) else {
+            log("appleScript: could not create script")
+            return ""
+        }
+        let result = script.executeAndReturnError(&error)
+        if let error {
+            let msg = error[NSAppleScript.errorMessage] as? String
+                ?? error[NSAppleScript.errorNumber] as? String
+                ?? "\(error)"
+            log("appleScript ERR: \(msg)")
+            return "ERR:\(msg)"
+        }
+        return (result.stringValue ?? "OK").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func loadJSON(_ path: String) -> [String: Any] {
         guard let data = FileManager.default.contents(atPath: path),
               let obj = try? JSONSerialization.jsonObject(with: data),
@@ -559,7 +578,6 @@ enum TerminalTheme {
     /// View-session token always present in Terminal title: "tmux attach-session -t hermes-pair-w0"
     static func viewToken(pair: String, role: String) -> String {
         if role == "hermes" { return "\(pair)-h" }
-        // role w1 -> -w0, w2 -> -w1
         if role.hasPrefix("w"), let n = Int(role.dropFirst()), n >= 1 {
             return "\(pair)-w\(n - 1)"
         }
@@ -572,7 +590,7 @@ enum TerminalTheme {
     }
 
     static func listWindows() -> [(id: String, title: String)] {
-        let out = Pong.osascript("""
+        let out = Pong.appleScript("""
         tell application "Terminal"
           set acc to ""
           repeat with w in windows
@@ -593,67 +611,57 @@ enum TerminalTheme {
         return rows
     }
 
-    /// Find pair pane by stored id (if title still matches view token) or by view token alone.
-    /// Never match bare "hermes"/"claude" (that hit the agent chat).
+    /// Strict: only windows whose title contains "attach-session -t <token>".
+    /// Never match agent chat (hermes ▸) or bare "hermes".
     static func resolvePairWindow(stored: String?, viewToken: String) -> String? {
         let wins = listWindows()
-        let token = viewToken.lowercased()
-        // Prefer exact attach target in title
-        func matches(_ title: String) -> Bool {
+        let needle = "attach-session -t \(viewToken)".lowercased()
+        func isPairPane(_ title: String) -> Bool {
             let t = title.lowercased()
-            return t.contains("attach-session -t \(token)") || t.contains("-t \(token)") || t.contains(token)
-        }
-        // Refuse agent chat windows
-        func isAgentChat(_ title: String) -> Bool {
-            let t = title.lowercased()
-            return t.contains("hermes ▸") || t.contains("osascript") || t.contains("⚡")
+            if t.contains("hermes ▸") { return false }
+            if t.contains("osascript") { return false }
+            return t.contains(needle)
         }
         if let s = stored, Int(s) != nil {
-            if let title = wins.first(where: { $0.id == s })?.title {
-                if matches(title) && !isAgentChat(title) { return s }
-                Pong.log("theme id \(s) stale (title=\(title))")
+            if let title = wins.first(where: { $0.id == s })?.title, isPairPane(title) {
+                return s
             }
         }
-        for (id, title) in wins {
-            if isAgentChat(title) { continue }
-            if matches(title) { return id }
+        for (id, title) in wins where isPairPane(title) {
+            return id
         }
+        Pong.log("theme resolve miss token=\(viewToken) windows=\(wins.map { $0.title }.joined(separator: " || "))")
         return nil
     }
 
-    /// Apply name + colors to a pair Terminal. Uses tab properties (proven on this Mac).
-    /// colors.highlight = Window accent (bold/cursor; Terminal has no title-bar color API).
+    /// Title + colors on ONE pair pane. Uses NSAppleScript + tab properties.
+    /// colors.highlight = Window accent (bold + cursor). Terminal has no title-bar color API.
     static func apply(windowId: String?, displayTitle: String, viewToken: String, colors: Colors?, profile: String) {
         guard let wid = windowId, Int(wid) != nil else {
             Pong.log("theme apply skip — no window for \(viewToken)")
             return
         }
-        // Safety: only touch windows that still look like this pair view
         if let title = listWindows().first(where: { $0.id == wid })?.title {
             let t = title.lowercased()
-            if t.contains("hermes ▸") || t.contains("osascript") {
-                Pong.log("theme APPLY BLOCKED agent-chat window=\(wid) title=\(title)")
-                return
-            }
-            if !t.contains(viewToken.lowercased()) {
-                Pong.log("theme APPLY BLOCKED window=\(wid) missing token \(viewToken) title=\(title)")
+            let needle = "attach-session -t \(viewToken)".lowercased()
+            if t.contains("hermes ▸") || !t.contains(needle) {
+                Pong.log("theme APPLY BLOCKED window=\(wid) token=\(viewToken) title=\(title)")
                 return
             }
         }
 
-        let safeTitle = escapeAS(displayTitle
+        let safeTitle = escapeAS(String(displayTitle.prefix(48))
             .replacingOccurrences(of: "\"", with: "")
             .replacingOccurrences(of: "\\", with: ""))
         let prof = escapeAS(profile)
 
-        var colorBlock = ""
+        var colorLines = ""
         if let c = colors {
             let bg = c.t16(c.bg)
             let tx = c.t16(c.text)
-            let win = c.t16(c.highlight) // Window accent
-            colorBlock = """
+            let win = c.t16(c.highlight)
+            colorLines = """
 
-            -- Private profile so we never mutate Basic/Pro
             set setName to "\(prof)"
             try
               set theme to settings set setName
@@ -665,7 +673,6 @@ enum TerminalTheme {
             set bold text color of theme to \(win)
             set cursor color of theme to \(win)
             set current settings of T to theme
-            -- Also set tab live colors (immediate)
             set background color of T to \(bg)
             set normal text color of T to \(tx)
             set bold text color of T to \(win)
@@ -673,12 +680,11 @@ enum TerminalTheme {
             """
         }
 
-        let script = """
+        let source = """
         tell application "Terminal"
           try
             set W to window id \(wid)
             set T to selected tab of W
-            -- Force custom title to dominate the window name
             set title displays custom title of T to true
             set title displays device name of T to false
             set title displays shell path of T to false
@@ -690,17 +696,14 @@ enum TerminalTheme {
               set title displays settings name of T to false
             end try
             set custom title of T to "\(safeTitle)"
-            try
-              set custom title of W to "\(safeTitle)"
-            end try
-            \(colorBlock)
+            \(colorLines)
             return "OK"
           on error errMsg
             return "ERR:" & errMsg
           end try
         end tell
         """
-        let out = Pong.osascript(script)
+        let out = Pong.appleScript(source)
         Pong.log("theme apply window=\(wid) token=\(viewToken) title=\(displayTitle) → \(out.isEmpty ? "(empty)" : out)")
     }
 
@@ -1929,12 +1932,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// New pair: Claude · Other Model · Team · Cancel
     static func pickWorkerTypes() -> [WorkerType]? {
         NSApp.activate(ignoringOtherApps: true)
+        let saved = SavedTeams.loadAll()
         let gate = NSAlert()
         gate.messageText = "New pair"
-        gate.informativeText = "Always one Hermes. Pick how to staff it."
+        gate.informativeText = saved.isEmpty
+            ? "Always one Hermes. Pick how to staff it.\n(Save a team from an Active pair to enable Load Team.)"
+            : "Always one Hermes.\nLoad Team = spawn a saved team (\(saved.count) saved)."
         gate.addButton(withTitle: "Claude")
         gate.addButton(withTitle: "Other Model")
         gate.addButton(withTitle: "Team")
+        if !saved.isEmpty {
+            gate.addButton(withTitle: "Load Team")
+        }
         gate.addButton(withTitle: "Cancel")
         let g = gate.runModal()
         let first = NSApplication.ModalResponse.alertFirstButtonReturn
@@ -1946,6 +1955,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if g == NSApplication.ModalResponse(rawValue: first.rawValue + 2) {
             return TeamBuilderPanel.run(mode: .team)
+        }
+        if !saved.isEmpty && g == NSApplication.ModalResponse(rawValue: first.rawValue + 3) {
+            return pickAndSpawnSavedTeam() ? [] : nil
         }
         return nil
     }
@@ -2145,10 +2157,17 @@ final class PanelController: NSObject {
         y -= 44
         content.addSubview(button("New pair", #selector(newPairPressed(_:)),
             NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 38)))
-        y -= 36
-        content.addSubview(Self.label("Claude · Other Model · Team (vertical). Saved teams live under Team.",
-            frame: NSRect(x: PAD + 2, y: y, width: W - 2 * PAD - 4, height: 32), size: 12, secondary: true))
-        y -= 48
+        y -= 40
+        let nSaved = SavedTeams.loadAll().count
+        let loadTitle = nSaved > 0 ? "Load Team (\(nSaved))" : "Load Team"
+        let loadBtn = button(loadTitle, #selector(loadTeamPressed(_:)),
+            NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 36))
+        loadBtn.isEnabled = nSaved > 0
+        content.addSubview(loadBtn)
+        y -= 34
+        content.addSubview(Self.label("Claude · Other Model · Team · Load Team (after Save Team on a pair).",
+            frame: NSRect(x: PAD + 2, y: y, width: W - 2 * PAD - 4, height: 28), size: 11, secondary: true))
+        y -= 44
         content.addSubview(button("Link existing terminals", #selector(linkPressed(_:)),
             NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 38)))
         y -= 48
@@ -2335,6 +2354,12 @@ final class PanelController: NSObject {
     }
 
     // MARK: Actions
+
+    @objc private func loadTeamPressed(_ sender: NSButton) {
+        if AppDelegate.pickAndSpawnSavedTeam() {
+            refreshUI()
+        }
+    }
 
     @objc private func newPairPressed(_ sender: NSButton) {
         guard let workers = AppDelegate.pickWorkerTypes() else { return }
@@ -2645,7 +2670,7 @@ final class TeamBuilderPanel: NSObject {
 
     private func build() {
         let W: CGFloat = 360
-        let H: CGFloat = mode == .oneModel ? 420 : 520
+        let H: CGFloat = mode == .oneModel ? 420 : 620
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: W, height: H),
             styleMask: [.titled, .closable],
@@ -2676,6 +2701,43 @@ final class TeamBuilderPanel: NSObject {
         content.addSubview(sub)
         y -= 44
 
+        // Saved teams FIRST (team mode) so Load is obvious
+        if mode == .team {
+            let saved = SavedTeams.loadAll()
+            if !saved.isEmpty {
+                y -= 18
+                let sh = NSTextField(labelWithString: "LOAD SAVED TEAM")
+                sh.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+                sh.textColor = NSColor(calibratedRed: 0.45, green: 0.7, blue: 1.0, alpha: 1)
+                sh.frame = NSRect(x: 20, y: y, width: W - 40, height: 14)
+                content.addSubview(sh)
+                for t in saved.prefix(8) {
+                    y -= 36
+                    let b = NSButton(frame: NSRect(x: 20, y: y, width: W - 40, height: 32))
+                    b.title = "Load  \(t.name)  (\(t.workers.count) workers)"
+                    b.bezelStyle = .rounded
+                    b.target = self
+                    b.action = #selector(spawnSaved(_:))
+                    b.identifier = NSUserInterfaceItemIdentifier(t.id)
+                    content.addSubview(b)
+                }
+                y -= 12
+                let div = NSTextField(labelWithString: "— or build a new team —")
+                div.font = NSFont.systemFont(ofSize: 10)
+                div.textColor = NSColor(calibratedWhite: 0.45, alpha: 1)
+                div.alignment = .center
+                div.frame = NSRect(x: 20, y: y, width: W - 40, height: 14)
+                content.addSubview(div)
+            } else {
+                y -= 18
+                let sh = NSTextField(labelWithString: "No saved teams yet — Save Team on an Active pair.")
+                sh.font = NSFont.systemFont(ofSize: 10)
+                sh.textColor = NSColor(calibratedWhite: 0.45, alpha: 1)
+                sh.frame = NSRect(x: 20, y: y, width: W - 40, height: 14)
+                content.addSubview(sh)
+            }
+        }
+
         // —— Models (vertical) ——
         let models = WorkerType.all.filter { $0.id != "custom" }
         for w in models {
@@ -2698,27 +2760,6 @@ final class TeamBuilderPanel: NSObject {
         content.addSubview(custom)
 
         if mode == .team {
-            y -= 16
-            // Saved teams section
-            let saved = SavedTeams.loadAll()
-            if !saved.isEmpty {
-                y -= 20
-                let sh = NSTextField(labelWithString: "SAVED TEAMS")
-                sh.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-                sh.textColor = NSColor(calibratedWhite: 0.5, alpha: 1)
-                sh.frame = NSRect(x: 20, y: y, width: W - 40, height: 14)
-                content.addSubview(sh)
-                for t in saved.prefix(6) {
-                    y -= 34
-                    let b = NSButton(frame: NSRect(x: 20, y: y, width: W - 40, height: 30))
-                    b.title = "Spawn  \(t.name)  (\(t.workers.count))"
-                    b.bezelStyle = .rounded
-                    b.target = self
-                    b.action = #selector(spawnSaved(_:))
-                    b.identifier = NSUserInterfaceItemIdentifier(t.id)
-                    content.addSubview(b)
-                }
-            }
 
             y -= 16
             rosterLabel = NSTextField(wrappingLabelWithString: "Team: (empty)")
