@@ -36,7 +36,7 @@ Hermes sends a task into your **live worker terminal** (paste + Enter). Default 
 
 ---
 
-## Multi-worker teams (v1.4.0)
+## Multi-worker teams (v1.3.1)
 
 One **Hermes** orchestrates one or more **workers** under a single Active pair (tree UI).
 
@@ -91,7 +91,7 @@ Per-**worker** only (Hermes row has **Save Team** instead of Perms):
 
 ---
 
-## Install (macOS) — v1.4.0
+## Install (macOS) — v1.3.1
 
 ### Option A — release zip
 
@@ -265,13 +265,13 @@ bash scripts/build-app.sh
 bash scripts/install.sh
 ```
 
-App version is set in `scripts/build-app.sh` (`VERSION=1.4.0`).
+App version is set in `scripts/build-app.sh` (`VERSION=1.3.1`).
 
 ---
 
-## Changelog (v1.4.0)
+## Changelog (v1.3.1)
 
-First downloadable multi-worker teams release (tag `v1.3.1` existed without a GitHub release).
+First downloadable multi-worker teams release after 1.2.0 (repo had the work; GitHub Latest was still 1.2).
 
 - Multi-worker **teams** under one Hermes (tree UI)
 - **New pair**: Claude / Other Model / Team / Show Teams / Cancel
