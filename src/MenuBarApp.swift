@@ -2082,6 +2082,10 @@ final class PanelController: NSObject {
     private var window: NSWindow?
     private var statusLabel: NSTextField!
     private var listContainer: NSView!
+    private var pairsScroll: NSScrollView!
+    private var showTeamsBtn: NSButton?
+    private var showTeamsHint: NSTextField?
+    private var footerBar: NSView?
     private let guide = LinkGuideController()
 
     private let W: CGFloat = 460, H: CGFloat = 780, PAD: CGFloat = 28
@@ -2187,14 +2191,19 @@ final class PanelController: NSObject {
         content.addSubview(button("New pair", #selector(newPairPressed(_:)),
             NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 38)))
         y -= 40
-        let nSaved = SavedTeams.loadAll().count
-        let showTitle = nSaved > 0 ? "Show Teams (\(nSaved))" : "Show Teams"
-        content.addSubview(button(showTitle, #selector(showTeamsPressed(_:)),
-            NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 36)))
+        // Show Teams only when ≥1 saved (updated live in refreshUI)
+        let stBtn = button("Show Teams", #selector(showTeamsPressed(_:)),
+            NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 36))
+        stBtn.isHidden = true
+        content.addSubview(stBtn)
+        showTeamsBtn = stBtn
         y -= 34
-        content.addSubview(Self.label("Claude · Other Model · Team · Show Teams (open / dup / delete).",
-            frame: NSRect(x: PAD + 2, y: y, width: W - 2 * PAD - 4, height: 28), size: 11, secondary: true))
-        y -= 44
+        let stHint = Self.label("Open / duplicate / delete saved teams.",
+            frame: NSRect(x: PAD + 2, y: y, width: W - 2 * PAD - 4, height: 20), size: 11, secondary: true)
+        stHint.isHidden = true
+        content.addSubview(stHint)
+        showTeamsHint = stHint
+        y -= 36
         content.addSubview(button("Link existing terminals", #selector(linkPressed(_:)),
             NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 38)))
         y -= 48
@@ -2212,18 +2221,46 @@ final class PanelController: NSObject {
         content.addSubview(Self.label("Hub = Hermes (Save Team). Workers = Front / Kill / Perms + colors.",
             frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 13), size: 9, secondary: true))
 
-        y -= 280
-        listContainer = NSView(frame: NSRect(x: PAD, y: y, width: W - 2 * PAD, height: 260))
-        content.addSubview(listContainer)
-
+        // Sticky footer: Refresh + Close Panel always at bottom
+        let footerH: CGFloat = 64
         let half = (W - 2 * PAD - 12) / 2
-        content.addSubview(button("Refresh", #selector(refreshPressed(_:)),
-            NSRect(x: PAD, y: 24, width: half, height: 36)))
-        content.addSubview(button("Close Panel", #selector(closePressed(_:)),
-            NSRect(x: PAD + half + 12, y: 24, width: half, height: 36)))
+        let footer = NSView(frame: NSRect(x: 0, y: 0, width: W, height: footerH))
+        footer.wantsLayer = true
+        footer.layer?.backgroundColor = NSColor(calibratedRed: 0.10, green: 0.10, blue: 0.12, alpha: 1).cgColor
+        footer.addSubview(button("Refresh", #selector(refreshPressed(_:)),
+            NSRect(x: PAD, y: 16, width: half, height: 36)))
+        footer.addSubview(button("Close Panel", #selector(closePressed(_:)),
+            NSRect(x: PAD + half + 12, y: 16, width: half, height: 36)))
+        content.addSubview(footer)
+        footerBar = footer
+
+        // Scrollable active pairs between section header and sticky footer
+        let pairsTop = y - 8
+        let pairsH = max(120, pairsTop - footerH - 8)
+        pairsScroll = NSScrollView(frame: NSRect(x: PAD, y: footerH + 4, width: W - 2 * PAD, height: pairsH))
+        pairsScroll.hasVerticalScroller = true
+        pairsScroll.hasHorizontalScroller = false
+        pairsScroll.autohidesScrollers = false
+        pairsScroll.borderType = .noBorder
+        pairsScroll.drawsBackground = false
+        pairsScroll.scrollerStyle = .legacy
+        listContainer = NSView(frame: NSRect(x: 0, y: 0, width: W - 2 * PAD, height: pairsH))
+        pairsScroll.documentView = listContainer
+        content.addSubview(pairsScroll)
 
         win.contentView = content
         window = win
+        updateShowTeamsChrome()
+    }
+
+    private func updateShowTeamsChrome() {
+        let n = SavedTeams.loadAll().count
+        let has = n > 0
+        showTeamsBtn?.isHidden = !has
+        showTeamsHint?.isHidden = !has
+        if has {
+            showTeamsBtn?.title = "Show Teams (\(n))"
+        }
     }
 
     func refreshUI() {
@@ -2231,6 +2268,7 @@ final class PanelController: NSObject {
         statusLabel?.stringValue = pairs.isEmpty
             ? "○ Idle  ·  no pair running"
             : "● \(pairs.count) active  ·  \(pairs.joined(separator: ", "))"
+        updateShowTeamsChrome()
         rebuildList(pairs)
     }
 
@@ -2238,16 +2276,18 @@ final class PanelController: NSObject {
         guard let listContainer else { return }
         listContainer.subviews.forEach { $0.removeFromSuperview() }
         let boxW = listContainer.bounds.width > 0 ? listContainer.bounds.width : (W - 2 * PAD)
+        let viewH = max(pairsScroll?.contentSize.height ?? 200, 120)
+        let db = PairState.loadPairsDb()
+
         if pairs.isEmpty {
+            listContainer.setFrameSize(NSSize(width: boxW, height: viewH))
             listContainer.addSubview(Self.label("No pairs yet — use New pair.",
-                frame: NSRect(x: 0, y: 150, width: boxW, height: 20), size: 12, secondary: true))
+                frame: NSRect(x: 0, y: viewH / 2 - 10, width: boxW, height: 20), size: 12, secondary: true))
             return
         }
 
-        let top: CGFloat = listContainer.bounds.height > 0 ? listContainer.bounds.height - 4 : 200
-        var y = top
-        let db = PairState.loadPairsDb()
-
+        var est: CGFloat = 12
+        var prepared: [(String, [String: Any], [[String: Any]], String, TerminalTheme.Colors)] = []
         for name in pairs {
             let entry = db[name] as? [String: Any] ?? [:]
             var ws = Workers.list(from: entry)
@@ -2261,9 +2301,15 @@ final class PanelController: NSObject {
             let display = (entry["display_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let hermesTitle = display.isEmpty ? name : display
             let hCols = TerminalTheme.Colors.from(entry["colors"]) ?? .hermesDefault
-            let hNS = hCols.asNSColors
+            prepared.append((name, entry, ws, hermesTitle, hCols))
+            est += 36 + CGFloat(ws.count) * 34 + 12
+        }
+        let contentH = max(viewH, est)
+        listContainer.setFrameSize(NSSize(width: boxW, height: contentH))
 
-            // —— Hermes hub ——
+        var y = contentH - 4
+        for (name, _, ws, hermesTitle, hCols) in prepared {
+            let hNS = hCols.asNSColors
             let hermesH: CGFloat = 36
             y -= hermesH
             let hermesRow = NSView(frame: NSRect(x: 0, y: y, width: boxW, height: hermesH))
@@ -2272,15 +2318,12 @@ final class PanelController: NSObject {
                 NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.16, alpha: 1).cgColor
             hermesRow.layer?.cornerRadius = 8
 
-            // Color swatch (click → colors)
             hermesRow.addSubview(swatchButton(
                 color: hNS.hi,
                 frame: NSRect(x: 8, y: 10, width: 14, height: 14),
                 id: name,
                 action: #selector(hermesColorPressed(_:))
             ))
-
-            // Name (click → rename)
             hermesRow.addSubview(nameButton(
                 "Hermes · \(hermesTitle)",
                 frame: NSRect(x: 28, y: 6, width: 140, height: 24),
@@ -2291,10 +2334,8 @@ final class PanelController: NSObject {
                 NSRect(x: 172, y: 5, width: 46, height: 26), id: name))
             hermesRow.addSubview(button("Kill", #selector(killPressed(_:)),
                 NSRect(x: 220, y: 5, width: 42, height: 26), id: name))
-            // No Hermes Perms — only workers have access bans. Save Team instead.
             hermesRow.addSubview(button("Save Team", #selector(saveTeamPressed(_:)),
                 NSRect(x: 264, y: 5, width: 90, height: 26), id: name))
-            // Do NOT applyPair on every refresh — that re-painted unrelated Terminals.
             listContainer.addSubview(hermesRow)
 
             for (i, w) in ws.enumerated() {
@@ -2345,6 +2386,12 @@ final class PanelController: NSObject {
                 listContainer.addSubview(row)
             }
             y -= 10
+        }
+
+        if let cv = pairsScroll?.contentView {
+            let topY = max(0, contentH - cv.bounds.height)
+            cv.scroll(to: NSPoint(x: 0, y: topY))
+            pairsScroll?.reflectScrolledClipView(cv)
         }
     }
 
@@ -2993,16 +3040,24 @@ final class ColorThemeSheet: NSObject {
 
 
 
+
+/// AppKit y-up is awkward for lists — flipped views lay out top→bottom.
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 // MARK: - Show Teams manager
 
 final class TeamsManagerPanel: NSObject {
     static let shared = TeamsManagerPanel()
     private var window: NSWindow?
     private var scrollView: NSScrollView!
-    private var listBox: NSView!
+    private var listBox: FlippedView!
     private var onChange: (() -> Void)?
-    private let listW: CGFloat = 388
-    private let listH: CGFloat = 390
+    private let winW: CGFloat = 420
+    private let winH: CGFloat = 520
+    private let footerH: CGFloat = 52
+    private let headerH: CGFloat = 72
 
     func show(onChange: (() -> Void)? = nil) {
         self.onChange = onChange
@@ -3014,7 +3069,7 @@ final class TeamsManagerPanel: NSObject {
     }
 
     private func build() {
-        let W: CGFloat = 420, H: CGFloat = 480
+        let W = winW, H = winH
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: W, height: H),
             styleMask: [.titled, .closable],
@@ -3025,6 +3080,7 @@ final class TeamsManagerPanel: NSObject {
         win.backgroundColor = NSColor(calibratedRed: 0.07, green: 0.07, blue: 0.09, alpha: 1)
         let content = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
 
+        // Header (fixed)
         let title = NSTextField(labelWithString: "Teams")
         title.font = .boldSystemFont(ofSize: 16)
         title.textColor = .white
@@ -3034,28 +3090,38 @@ final class TeamsManagerPanel: NSObject {
         let hint = NSTextField(labelWithString: "Click a team to open. Duplicate / Delete on the right.")
         hint.font = .systemFont(ofSize: 11)
         hint.textColor = NSColor(calibratedWhite: 0.55, alpha: 1)
-        hint.frame = NSRect(x: 20, y: H - 60, width: W - 40, height: 16)
+        hint.frame = NSRect(x: 20, y: H - 58, width: W - 40, height: 16)
         content.addSubview(hint)
 
-        scrollView = NSScrollView(frame: NSRect(x: 16, y: 56, width: W - 32, height: H - 90))
+        // Scroll region between header and sticky footer
+        let scrollY = footerH
+        let scrollH = H - headerH - footerH
+        scrollView = NSScrollView(frame: NSRect(x: 16, y: scrollY, width: W - 32, height: scrollH))
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
-        scrollView.autohidesScrollers = true
-        scrollView.borderType = .noBorder
-        scrollView.drawsBackground = false
-        scrollView.backgroundColor = .clear
-        scrollView.scrollerStyle = .overlay
+        scrollView.autohidesScrollers = false
+        scrollView.borderType = .lineBorder
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 1)
+        scrollView.scrollerStyle = .legacy
+        scrollView.verticalScrollElasticity = .allowed
+        scrollView.automaticallyAdjustsContentInsets = false
 
-        listBox = NSView(frame: NSRect(x: 0, y: 0, width: listW, height: listH))
+        listBox = FlippedView(frame: NSRect(x: 0, y: 0, width: W - 32, height: scrollH))
         scrollView.documentView = listBox
         content.addSubview(scrollView)
 
-        let close = NSButton(frame: NSRect(x: W - 100, y: 14, width: 80, height: 30))
+        // Sticky footer — always above scroll content
+        let footer = NSView(frame: NSRect(x: 0, y: 0, width: W, height: footerH))
+        footer.wantsLayer = true
+        footer.layer?.backgroundColor = NSColor(calibratedRed: 0.07, green: 0.07, blue: 0.09, alpha: 1).cgColor
+        let close = NSButton(frame: NSRect(x: W - 100, y: 12, width: 80, height: 30))
         close.title = "Close"
         close.bezelStyle = .rounded
         close.target = self
         close.action = #selector(closePressed)
-        content.addSubview(close)
+        footer.addSubview(close)
+        content.addSubview(footer)
 
         win.contentView = content
         window = win
@@ -3065,36 +3131,35 @@ final class TeamsManagerPanel: NSObject {
         listBox.subviews.forEach { $0.removeFromSuperview() }
         let teams = SavedTeams.loadAll()
         let rowH: CGFloat = 52
-        let gap: CGFloat = 6
-        let contentH: CGFloat
-        if teams.isEmpty {
-            contentH = listH
-        } else {
-            contentH = max(listH, CGFloat(teams.count) * (rowH + gap) + 16)
-        }
-        listBox.setFrameSize(NSSize(width: listW, height: contentH))
+        let gap: CGFloat = 8
+        let pad: CGFloat = 8
+        let width = max(scrollView.contentSize.width, winW - 32)
 
         if teams.isEmpty {
+            let h = max(scrollView.contentSize.height, 200)
+            listBox.setFrameSize(NSSize(width: width, height: h))
             let empty = NSTextField(labelWithString: "No saved teams yet.\nSave Team on an Active pair Hermes row.")
             empty.font = .systemFont(ofSize: 12)
             empty.textColor = NSColor(calibratedWhite: 0.5, alpha: 1)
             empty.alignment = .center
             empty.maximumNumberOfLines = 3
-            empty.frame = NSRect(x: 10, y: contentH / 2 - 30, width: listW - 20, height: 60)
+            empty.frame = NSRect(x: 10, y: 40, width: width - 20, height: 60)
             listBox.addSubview(empty)
-            scrollToTop()
             return
         }
 
-        var y = contentH - 8
+        let contentH = pad + CGFloat(teams.count) * (rowH + gap) + pad
+        let minH = max(scrollView.contentSize.height, 100)
+        listBox.setFrameSize(NSSize(width: width, height: max(contentH, minH)))
+
+        var y = pad
         for t in teams {
-            y -= rowH
-            let row = NSView(frame: NSRect(x: 0, y: y, width: listW, height: rowH - 4))
+            let row = NSView(frame: NSRect(x: 4, y: y, width: width - 8, height: rowH))
             row.wantsLayer = true
             row.layer?.backgroundColor = NSColor(calibratedWhite: 0.14, alpha: 1).cgColor
             row.layer?.cornerRadius = 8
 
-            let nameBtn = NSButton(frame: NSRect(x: 10, y: 10, width: 200, height: 30))
+            let nameBtn = NSButton(frame: NSRect(x: 10, y: 11, width: max(140, width - 200), height: 30))
             nameBtn.title = "\(t.name)  (\(t.workers.count))"
             nameBtn.bezelStyle = .inline
             nameBtn.isBordered = false
@@ -3107,22 +3172,18 @@ final class TeamsManagerPanel: NSObject {
             nameBtn.toolTip = "Open / launch this team"
             row.addSubview(nameBtn)
 
-            let dup = smallBtn("Duplicate", #selector(dupPressed(_:)),
-                               NSRect(x: 218, y: 12, width: 88, height: 26), t.id)
             let del = smallBtn("Delete", #selector(deletePressed(_:)),
-                               NSRect(x: 310, y: 12, width: 64, height: 26), t.id)
+                               NSRect(x: width - 80, y: 13, width: 64, height: 26), t.id)
+            let dup = smallBtn("Duplicate", #selector(dupPressed(_:)),
+                               NSRect(x: width - 176, y: 13, width: 88, height: 26), t.id)
             row.addSubview(dup)
             row.addSubview(del)
             listBox.addSubview(row)
-            y -= gap
+            y += rowH + gap
         }
-        scrollToTop()
-    }
 
-    private func scrollToTop() {
-        guard let doc = scrollView.documentView else { return }
-        let y = max(0, doc.bounds.height - scrollView.contentView.bounds.height)
-        scrollView.contentView.scroll(to: NSPoint(x: 0, y: y))
+        // Start at top of flipped view
+        scrollView.contentView.scroll(to: .zero)
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
@@ -3169,6 +3230,10 @@ final class TeamsManagerPanel: NSObject {
         SavedTeams.delete(id: id)
         rebuildList()
         onChange?()
+        // If last team gone, close manager
+        if SavedTeams.loadAll().isEmpty {
+            window?.orderOut(nil)
+        }
     }
 
     @objc private func closePressed() {
