@@ -556,10 +556,14 @@ enum TerminalTheme {
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
-    /// Marker stamped into Terminal custom title so we never paint random windows (e.g. this Hermes chat).
-    static func stamp(pair: String, role: String) -> String {
-        // ASCII only — reliable in AppleScript + window title matching
-        "HP|\(pair)|\(role)"
+    /// View-session token always present in Terminal title: "tmux attach-session -t hermes-pair-w0"
+    static func viewToken(pair: String, role: String) -> String {
+        if role == "hermes" { return "\(pair)-h" }
+        // role w1 -> -w0, w2 -> -w1
+        if role.hasPrefix("w"), let n = Int(role.dropFirst()), n >= 1 {
+            return "\(pair)-w\(n - 1)"
+        }
+        return "\(pair)-\(role)"
     }
 
     static func profileName(pair: String, role: String) -> String {
@@ -589,58 +593,67 @@ enum TerminalTheme {
         return rows
     }
 
-    /// Only accept a window if stored id still exists AND title still has our HP| stamp (or stampHint).
-    static func resolveStampedWindow(stored: String?, stampHint: String) -> String? {
+    /// Find pair pane by stored id (if title still matches view token) or by view token alone.
+    /// Never match bare "hermes"/"claude" (that hit the agent chat).
+    static func resolvePairWindow(stored: String?, viewToken: String) -> String? {
         let wins = listWindows()
-        let byId = Dictionary(uniqueKeysWithValues: wins.map { ($0.id, $0.title) })
-        if let s = stored, Int(s) != nil, let title = byId[s] {
-            if title.contains(stampHint) || title.contains("HP|") {
-                return s
-            }
-            // id reused by another Terminal — refuse
-            Pong.log("theme refuse window \(s) — title lost stamp: \(title)")
+        let token = viewToken.lowercased()
+        // Prefer exact attach target in title
+        func matches(_ title: String) -> Bool {
+            let t = title.lowercased()
+            return t.contains("attach-session -t \(token)") || t.contains("-t \(token)") || t.contains(token)
         }
-        // Fallback: find by stamp only (never bare "hermes"/"claude")
-        for (id, title) in wins where title.contains(stampHint) {
-            return id
+        // Refuse agent chat windows
+        func isAgentChat(_ title: String) -> Bool {
+            let t = title.lowercased()
+            return t.contains("hermes ▸") || t.contains("osascript") || t.contains("⚡")
+        }
+        if let s = stored, Int(s) != nil {
+            if let title = wins.first(where: { $0.id == s })?.title {
+                if matches(title) && !isAgentChat(title) { return s }
+                Pong.log("theme id \(s) stale (title=\(title))")
+            }
+        }
+        for (id, title) in wins {
+            if isAgentChat(title) { continue }
+            if matches(title) { return id }
         }
         return nil
     }
 
-    /// Set Terminal custom title + private color profile. Refuses unstamped windows.
-    static func apply(windowId: String?, displayTitle: String, stamp: String, colors: Colors?, profile: String) {
+    /// Apply name + colors to a pair Terminal. Uses tab properties (proven on this Mac).
+    /// colors.highlight = Window accent (bold/cursor; Terminal has no title-bar color API).
+    static func apply(windowId: String?, displayTitle: String, viewToken: String, colors: Colors?, profile: String) {
         guard let wid = windowId, Int(wid) != nil else {
-            Pong.log("theme apply skip — no window id profile=\(profile)")
+            Pong.log("theme apply skip — no window for \(viewToken)")
             return
         }
-        // Safety: never paint a window that doesn't carry our stamp
-        let wins = listWindows()
-        if let title = wins.first(where: { $0.id == wid })?.title {
-            if !title.contains("HP|") && !title.contains(stamp) {
-                Pong.log("theme APPLY BLOCKED window=\(wid) not stamped (title=\(title)) — would hit wrong Terminal")
+        // Safety: only touch windows that still look like this pair view
+        if let title = listWindows().first(where: { $0.id == wid })?.title {
+            let t = title.lowercased()
+            if t.contains("hermes ▸") || t.contains("osascript") {
+                Pong.log("theme APPLY BLOCKED agent-chat window=\(wid) title=\(title)")
+                return
+            }
+            if !t.contains(viewToken.lowercased()) {
+                Pong.log("theme APPLY BLOCKED window=\(wid) missing token \(viewToken) title=\(title)")
                 return
             }
         }
 
+        let safeTitle = escapeAS(displayTitle
+            .replacingOccurrences(of: "\"", with: "")
+            .replacingOccurrences(of: "\\", with: ""))
         let prof = escapeAS(profile)
-        // Title shown to user; keep stamp prefix so we can re-find the window
-        let fullTitle = escapeAS("\(stamp) · \(displayTitle)")
-        var script = """
-        tell application "Terminal"
-          try
-            set W to window id \(wid)
-            set T to selected tab of W
-            set custom title of W to "\(fullTitle)"
-            try
-              set custom title of T to "\(fullTitle)"
-            end try
-        """
+
+        var colorBlock = ""
         if let c = colors {
             let bg = c.t16(c.bg)
             let tx = c.t16(c.text)
-            let hi = c.t16(c.highlight)
-            script += """
+            let win = c.t16(c.highlight) // Window accent
+            colorBlock = """
 
+            -- Private profile so we never mutate Basic/Pro
             set setName to "\(prof)"
             try
               set theme to settings set setName
@@ -649,16 +662,38 @@ enum TerminalTheme {
             end try
             set background color of theme to \(bg)
             set normal text color of theme to \(tx)
-            set bold text color of theme to \(hi)
-            set cursor color of theme to \(hi)
-            try
-              set selected text color of theme to \(hi)
-            end try
+            set bold text color of theme to \(win)
+            set cursor color of theme to \(win)
             set current settings of T to theme
+            -- Also set tab live colors (immediate)
+            set background color of T to \(bg)
+            set normal text color of T to \(tx)
+            set bold text color of T to \(win)
+            set cursor color of T to \(win)
             """
         }
-        script += """
 
+        let script = """
+        tell application "Terminal"
+          try
+            set W to window id \(wid)
+            set T to selected tab of W
+            -- Force custom title to dominate the window name
+            set title displays custom title of T to true
+            set title displays device name of T to false
+            set title displays shell path of T to false
+            set title displays window size of T to false
+            try
+              set title displays file name of T to false
+            end try
+            try
+              set title displays settings name of T to false
+            end try
+            set custom title of T to "\(safeTitle)"
+            try
+              set custom title of W to "\(safeTitle)"
+            end try
+            \(colorBlock)
             return "OK"
           on error errMsg
             return "ERR:" & errMsg
@@ -666,37 +701,13 @@ enum TerminalTheme {
         end tell
         """
         let out = Pong.osascript(script)
-        Pong.log("theme apply window=\(wid) profile=\(profile) stamp=\(stamp) → \(out.isEmpty ? "(empty)" : out)")
+        Pong.log("theme apply window=\(wid) token=\(viewToken) title=\(displayTitle) → \(out.isEmpty ? "(empty)" : out)")
     }
 
-    /// Stamp immediately after open (before user renames).
-    static func stampWindow(_ windowId: String?, pair: String, role: String, displayTitle: String) {
-        guard let wid = windowId, Int(wid) != nil else { return }
-        let st = stamp(pair: pair, role: role)
-        let full = escapeAS("\(st) · \(displayTitle)")
-        let out = Pong.osascript("""
-        tell application "Terminal"
-          try
-            set W to window id \(wid)
-            set custom title of W to "\(full)"
-            try
-              set custom title of selected tab of W to "\(full)"
-            end try
-            return "OK"
-          on error errMsg
-            return "ERR:" & errMsg
-          end try
-        end tell
-        """)
-        Pong.log("stamp window=\(wid) \(st) → \(out)")
-    }
-
-    /// tmux window name (shows in Terminal title when set-titles is on)
     static func tmuxTitle(baseSession: String, tmuxIndex: Int, displayTitle: String) {
         let safe = displayTitle
             .replacingOccurrences(of: "'", with: "")
             .replacingOccurrences(of: "\"", with: "")
-        // disable auto-rename so our name sticks
         _ = Pong.sh("tmux set-option -t \(baseSession):\(tmuxIndex) automatic-rename off 2>/dev/null || true")
         _ = Pong.sh("tmux rename-window -t \(baseSession):\(tmuxIndex) '\(safe)' 2>/dev/null || true")
         _ = Pong.sh("tmux set-option -t \(baseSession) set-titles on 2>/dev/null || true")
@@ -711,9 +722,9 @@ enum TerminalTheme {
         let storedH = entry["hermes_window_id"].flatMap { v -> String? in
             let s = "\(v)"; return (s == "<null>" || s.isEmpty) ? nil : s
         }
-        let hStamp = stamp(pair: pair, role: "hermes")
-        let hid = resolveStampedWindow(stored: storedH, stampHint: hStamp)
-        apply(windowId: hid, displayTitle: "Hermes · \(hermesLabel)", stamp: hStamp,
+        let hToken = viewToken(pair: pair, role: "hermes")
+        let hid = resolvePairWindow(stored: storedH, viewToken: hToken)
+        apply(windowId: hid, displayTitle: "Hermes · \(hermesLabel)", viewToken: hToken,
               colors: hColors, profile: profileName(pair: pair, role: "hermes"))
         tmuxTitle(baseSession: pair, tmuxIndex: 0, displayTitle: "Hermes · \(hermesLabel)")
 
@@ -724,10 +735,10 @@ enum TerminalTheme {
             let lab = (ws[i]["label"] as? String) ?? "Worker"
             let storedW = "\(ws[i]["window_id"] ?? "")"
             let storedOpt = Int(storedW) != nil ? storedW : nil
-            let wStamp = stamp(pair: pair, role: id)
-            let wid = resolveStampedWindow(stored: storedOpt, stampHint: wStamp)
+            let token = viewToken(pair: pair, role: id)
+            let wid = resolvePairWindow(stored: storedOpt, viewToken: token)
             let cols = Colors.from(ws[i]["colors"]) ?? .workerDefault
-            apply(windowId: wid, displayTitle: lab, stamp: wStamp,
+            apply(windowId: wid, displayTitle: lab, viewToken: token,
                   colors: cols, profile: profileName(pair: pair, role: id))
             let tmuxIdx = (ws[i]["tmux_index"] as? Int) ?? (i + 1)
             tmuxTitle(baseSession: pair, tmuxIndex: tmuxIdx, displayTitle: lab)
@@ -1163,22 +1174,18 @@ enum Pairing {
             Pong.log("closed stray Terminal window \(w.id) title=\(w.title)")
         }
         while windowIds.count < workerRecords.count { windowIds.append("") }
-        // Stamp titles IMMEDIATELY so we never confuse pair panes with other Terminals
-        TerminalTheme.stampWindow(hid, pair: name, role: "hermes", displayTitle: "Hermes · \(name)")
-        TerminalTheme.tmuxTitle(baseSession: name, tmuxIndex: 0, displayTitle: "Hermes · \(name)")
         for i in 0..<workerRecords.count {
             if i < windowIds.count, Int(windowIds[i]) != nil {
                 workerRecords[i]["window_id"] = windowIds[i]
-                let role = "w\(i + 1)"
-                let lab = list[i].label
-                TerminalTheme.stampWindow(windowIds[i], pair: name, role: role, displayTitle: lab)
-                TerminalTheme.tmuxTitle(baseSession: name, tmuxIndex: i + 1, displayTitle: lab)
             } else {
                 workerRecords[i]["window_id"] = NSNull()
             }
         }
         // Stack Terminal windows vertically (Hermes on top, workers below)
         tileWindowsVertically(hermesId: hid, workerIds: windowIds.filter { !$0.isEmpty })
+        TerminalTheme.applyPair(name)
+        // Titles + default colors (match by attach-session -t view token)
+        TerminalTheme.applyPair(name)
         let primaryWid = windowIds.first(where: { Int($0) != nil })
         let teamLabel = list.count == 1 ? list[0].label : "\(list.count) workers"
 
@@ -2323,7 +2330,7 @@ final class PanelController: NSObject {
         b.target = self
         b.action = action
         b.identifier = NSUserInterfaceItemIdentifier(id)
-        b.toolTip = "Colors: background, text, highlight"
+        b.toolTip = "Colors: background, text, window accent"
         return b
     }
 
@@ -2870,7 +2877,7 @@ final class ColorThemeSheet: NSObject {
             return well
         }
         var y: CGFloat = H - 48
-        let hint = NSTextField(labelWithString: "Applied to that Terminal window.")
+        let hint = NSTextField(labelWithString: "Background · Text · Window accent (bold/cursor).")
         hint.frame = NSRect(x: 24, y: y, width: W - 48, height: 18)
         hint.textColor = NSColor(calibratedWhite: 0.55, alpha: 1)
         hint.font = NSFont.systemFont(ofSize: 11)
@@ -2880,7 +2887,7 @@ final class ColorThemeSheet: NSObject {
         y -= 40
         textWell = row("Text", y: y)
         y -= 40
-        hiWell = row("Highlight", y: y)
+        hiWell = row("Window", y: y)
 
         let apply = NSButton(frame: NSRect(x: W - 24 - 100, y: 16, width: 100, height: 32))
         apply.title = "Apply"
