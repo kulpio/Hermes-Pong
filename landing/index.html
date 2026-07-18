@@ -306,21 +306,23 @@
     footer a { color: var(--hermes); text-decoration: none; }
     footer a:hover { text-decoration: underline; }
 
-    /* Light terminal window style */
-    .terminal-pair {
+    /* Vertical team diagram: Hermes on top, three workers under */
+    .team-diagram {
       display: flex;
+      flex-direction: column;
       align-items: center;
-      justify-content: center;
-      gap: 16px;
-      margin: 24px 0 32px;
+      gap: 12px;
+      margin: 28px 0 12px;
     }
     .terminal-window {
       background: #f8f9fa;
       border-radius: 10px;
-      width: 220px;
       box-shadow: 0 8px 30px rgba(0,0,0,0.1);
       overflow: hidden;
       border: 1px solid #ddd;
+    }
+    .terminal-window.hermes {
+      width: min(100%, 340px);
     }
     .terminal-header {
       background: #e9ecef;
@@ -330,9 +332,10 @@
       gap: 8px;
     }
     .terminal-dot {
-      width: 12px;
-      height: 12px;
+      width: 10px;
+      height: 10px;
       border-radius: 50%;
+      flex-shrink: 0;
     }
     .terminal-dot.red { background: #ff5f56; }
     .terminal-dot.yellow { background: #ffbd2e; }
@@ -340,21 +343,65 @@
     .terminal-title {
       flex: 1;
       text-align: center;
-      font-size: 0.85rem;
+      font-size: 0.82rem;
       font-weight: 600;
       color: #333;
     }
     .terminal-body {
-      padding: 16px 14px;
+      padding: 14px 12px;
       color: #222;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      font-size: 0.95rem;
+      font-size: 0.9rem;
       text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
     }
-    .arrow {
-      font-size: 1.6rem;
-      color: #888;
+    .terminal-body .role {
+      font-weight: 600;
+      color: var(--hermes);
+      font-size: .88rem;
     }
+    .worker-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+      max-width: 420px;
+    }
+    .terminal-window.worker {
+      width: 124px;
+      flex: 0 0 124px;
+    }
+    .terminal-window.worker .terminal-body {
+      padding: 12px 8px 14px;
+      min-height: 88px;
+    }
+    .model-logo {
+      width: 40px;
+      height: 40px;
+      object-fit: contain;
+      border-radius: 10px;
+      display: block;
+    }
+    .model-name {
+      font-size: .78rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: #333;
+    }
+    .team-blurb {
+      max-width: 34em;
+      margin: 0 auto 28px;
+      text-align: center;
+      color: var(--muted);
+      font-size: .98rem;
+      line-height: 1.45;
+    }
+    .team-blurb strong { color: var(--text); }
 
     .feat-grid {
       display: grid;
@@ -383,16 +430,6 @@
       font-size: .88rem;
       line-height: 1.4;
     }
-    .terminal-stack {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      align-items: stretch;
-      width: 220px;
-    }
-    .terminal-window.sm { width: 100%; }
-    .terminal-window.sm .terminal-body { padding: 10px 12px; font-size: .82rem; }
-    .terminal-pair.team { align-items: stretch; }
   </style>
 </head>
 <body>
@@ -421,41 +458,67 @@
       Model, resume, and context stay yours.
     </p>
 
-    <!-- Team: Hermes + stacked workers -->
-    <div class="terminal-pair team">
-      <div class="terminal-window">
+    <!-- Vertical: Hermes on top, three model workers underneath -->
+    <div class="team-diagram" aria-hidden="true">
+      <div class="terminal-window hermes">
         <div class="terminal-header">
           <div class="terminal-dot red"></div>
           <div class="terminal-dot yellow"></div>
           <div class="terminal-dot green"></div>
           <div class="terminal-title">Hermes</div>
         </div>
-        <div class="terminal-body" style="color:#2602f1; font-weight:600;">orchestrate · verify</div>
+        <div class="terminal-body">
+          <img class="model-logo" src="logo.png" alt="" width="40" height="40" />
+          <span class="role">orchestrate · verify · assign</span>
+        </div>
       </div>
 
-      <div class="arrow">→</div>
-
-      <div class="terminal-stack">
-        <div class="terminal-window sm">
+      <div class="worker-row">
+        <div class="terminal-window worker">
           <div class="terminal-header">
             <div class="terminal-dot red"></div>
             <div class="terminal-dot yellow"></div>
             <div class="terminal-dot green"></div>
-            <div class="terminal-title">Claude</div>
+            <div class="terminal-title">w1</div>
           </div>
-          <div class="terminal-body" style="color:#d97756; font-weight:600;">worker w1</div>
+          <div class="terminal-body">
+            <img class="model-logo" src="claude-logo.png" alt="Claude" width="40" height="40" />
+            <span class="model-name">Claude</span>
+          </div>
         </div>
-        <div class="terminal-window sm">
+        <div class="terminal-window worker">
           <div class="terminal-header">
             <div class="terminal-dot red"></div>
             <div class="terminal-dot yellow"></div>
             <div class="terminal-dot green"></div>
-            <div class="terminal-title">Grok · Kimi · …</div>
+            <div class="terminal-title">w2</div>
           </div>
-          <div class="terminal-body" style="color:#2602f1; font-weight:600;">worker w2+</div>
+          <div class="terminal-body">
+            <img class="model-logo" src="grok-logo.svg" alt="Grok" width="40" height="40" />
+            <span class="model-name">Grok</span>
+          </div>
+        </div>
+        <div class="terminal-window worker">
+          <div class="terminal-header">
+            <div class="terminal-dot red"></div>
+            <div class="terminal-dot yellow"></div>
+            <div class="terminal-dot green"></div>
+            <div class="terminal-title">w3</div>
+          </div>
+          <div class="terminal-body">
+            <img class="model-logo" src="kimi-logo.svg" alt="Kimi" width="40" height="40" />
+            <span class="model-name">Kimi</span>
+          </div>
         </div>
       </div>
     </div>
+    <p class="team-blurb">
+      <strong>A team is one Hermes plus the workers you pick.</strong>
+      New pair → Team stacks Claude, Grok, Kimi (or anything you sign into) under a single hub.
+      Save the lineup, reopen it later with Show Teams, and route work with
+      <code style="font-size:.9em">pong-delegate --worker w2</code>.
+      Each pane can have its own name, colors, and perms.
+    </p>
 
     <div class="pill-row">
       <span class="pill">Claude · Other Model · Team</span>
