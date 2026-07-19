@@ -268,6 +268,66 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_snapshot(args: argparse.Namespace) -> int:
+    from pong.snapshot import build_snapshot, write_snapshot
+
+    snap = build_snapshot(session=args.session, events_n=args.events)
+    path = write_snapshot(snap, session=args.session)
+    if args.write_only:
+        print(path)
+        return 0
+    if args.json or True:
+        # always JSON for machine/UI consumers; pretty by default
+        print(json.dumps(snap, indent=2 if not args.compact else None))
+    if args.write:
+        print(f"# wrote {path}", file=sys.stderr)
+    else:
+        # still refresh snapshot.json for panel file watchers
+        write_snapshot(snap)
+    return 0
+
+
+def _cmd_events(args: argparse.Namespace) -> int:
+    from pong import events
+
+    rows = events.tail(args.n, session=args.session)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    for r in rows:
+        print(f"{r.get('ts')}\t{r.get('type')}\t{r.get('session', '')}\t{json.dumps({k:v for k,v in r.items() if k not in ('ts','type','session')})}")
+    return 0
+
+
+def _cmd_check(args: argparse.Namespace) -> int:
+    """Foundation self-check for UI readiness."""
+    from pong import __version__
+    from pong.schema import CONTRACT_VERSION, SCHEMA_VERSION
+    from pong.snapshot import build_snapshot
+    from pong.paths import state_dir
+
+    snap = build_snapshot(session=args.session)
+    problems: list[str] = []
+    if snap.get("contract_version") != CONTRACT_VERSION:
+        problems.append("contract_version mismatch")
+    if "teams" not in snap or not isinstance(snap["teams"], list):
+        problems.append("snapshot.teams missing")
+    if "ledger" not in snap:
+        problems.append("snapshot.ledger missing")
+    for t in snap.get("teams") or []:
+        if "conductor" not in t or "workers" not in t or "jobs" not in t:
+            problems.append(f"team {t.get('session')} incomplete")
+    print(f"pong_version={__version__}")
+    print(f"schema_version={SCHEMA_VERSION} contract_version={CONTRACT_VERSION}")
+    print(f"state_dir={state_dir()}")
+    print(f"teams={len(snap.get('teams') or [])} bridge_on={snap.get('bridge_on')}")
+    if problems:
+        print("FAIL: " + "; ".join(problems))
+        return 1
+    print("OK foundation ready for UI consumers")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pong", description="Pong — agent mission control")
     p.add_argument("-s", "--session", default=None, help="bound team session")
@@ -278,6 +338,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     g = sub.add_parser("gate", help="BRIDGE_ON / BRIDGE_OFF")
     g.set_defaults(func=_cmd_gate)
+
+    snap = sub.add_parser("snapshot", help="UI snapshot JSON (contract v1)")
+    snap.add_argument("--json", action="store_true", default=True)
+    snap.add_argument("--compact", action="store_true")
+    snap.add_argument("--write", action="store_true", help="print path note on stderr")
+    snap.add_argument("--write-only", action="store_true", help="only write snapshot.json")
+    snap.add_argument("--events", type=int, default=40)
+    snap.set_defaults(func=_cmd_snapshot)
+
+    ev = sub.add_parser("events", help="tail events.jsonl")
+    ev.add_argument("-n", type=int, default=30)
+    ev.add_argument("--json", action="store_true")
+    ev.set_defaults(func=_cmd_events)
+
+    chk = sub.add_parser("check", help="foundation self-check (UI readiness)")
+    chk.set_defaults(func=_cmd_check)
 
     j = sub.add_parser("job", help="job control plane")
     jsub = j.add_subparsers(dest="job_cmd", required=True)

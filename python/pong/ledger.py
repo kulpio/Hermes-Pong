@@ -44,6 +44,19 @@ def record(
     vpath, _ = _paths()
     with vpath.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row) + "\n")
+    try:
+        from . import events
+
+        events.emit(
+            "verdict",
+            session=sess,
+            task_id=task_id,
+            verdict=verdict,
+            round=round_n,
+            worker=worker,
+        )
+    except Exception:
+        pass
     return row
 
 

@@ -68,11 +68,16 @@ def dispatch_job(
             used.append(name)
 
     job["transports_used"] = used
-    # Status: job_file success means queued at least; any notify success → notified
+    prev = str(job.get("status") or "queued")
+    # job_file success ⇒ at least queued; any non-file notify ⇒ notified
     notify_ok = any(r.ok and r.name != "job_file" for r in results)
     file_ok = any(r.ok and r.name == "job_file" for r in results)
     if file_ok and notify_ok:
         job["status"] = "notified"
+        job["error"] = None
+        for r in results:
+            if r.name == "headless" and r.ok and (r.meta or {}).get("stdout_tail"):
+                job["headless_tail"] = r.meta["stdout_tail"]
     elif file_ok:
         job["status"] = "queued"
         job["error"] = "; ".join(
@@ -82,4 +87,25 @@ def dispatch_job(
         job["status"] = "failed"
         job["error"] = "job_file transport failed"
     save_job(job)
+    try:
+        from .. import events
+
+        events.emit(
+            "job.dispatch",
+            session=str(job.get("session")),
+            job_id=str(job.get("id")),
+            status=job.get("status"),
+            transports=[r.name for r in results if r.ok],
+            **{"from": prev},
+        )
+        if prev != job.get("status"):
+            events.emit(
+                "job.status",
+                session=str(job.get("session")),
+                job_id=str(job.get("id")),
+                status=job.get("status"),
+                **{"from": prev},
+            )
+    except Exception:
+        pass
     return results

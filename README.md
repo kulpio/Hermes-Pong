@@ -56,12 +56,17 @@ pong migrate
 ```bash
 pong status
 pong gate                          # BRIDGE_ON / OFF
+pong check                         # foundation self-check (UI readiness)
+pong snapshot                      # JSON for the panel (contract v1)
 pong job create --worker w1 --task 'Implement login. Tests must pass.'
 pong job create --worker w1 --task '…' --no-paste    # robust: file only
 pong job list
 pong job show job_…
+pong events -n 20
 pong ledger record --task-id T1 --round 1 --verdict accept --evidence 'npm test ok'
 ```
+
+UI must build on **`pong snapshot`** — see [`docs/UI-CONTRACT.md`](docs/UI-CONTRACT.md).
 
 Compat aliases: `pong-delegate.py`, `claude-delegate.py`, `pong-gate.py`.
 

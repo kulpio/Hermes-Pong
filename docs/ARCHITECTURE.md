@@ -2,6 +2,8 @@
 
 **Pong** is local **agent mission control**: multi-CLI teams, conductor-agnostic orchestration, human-in-the-loop terminals, and a job control plane. Paste into a TUI is optional sugar — not the system of record.
 
+**UI consumers:** read [`UI-CONTRACT.md`](UI-CONTRACT.md) — `pong snapshot` is the only envelope the panel should depend on.
+
 ## Goals
 
 | Goal | How |
