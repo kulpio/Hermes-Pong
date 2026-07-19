@@ -21,10 +21,12 @@ mkdir -p "$MACOS" "$RES"
 # Universal binary: compile per-arch, lipo together. Relative source path so
 # no absolute build path lands in the Mach-O.
 cd "$ROOT"
-swiftc -O -o "$MACOS/$APP_NAME-arm64" "src/MenuBarApp.swift" \
+# Compile all Swift sources in src/ (panel split out for maintainability)
+SWIFT_SRCS=(src/*.swift)
+swiftc -O -o "$MACOS/$APP_NAME-arm64" "${SWIFT_SRCS[@]}" \
   -framework AppKit -framework Foundation \
   -target arm64-apple-macosx13.0
-swiftc -O -o "$MACOS/$APP_NAME-x86_64" "src/MenuBarApp.swift" \
+swiftc -O -o "$MACOS/$APP_NAME-x86_64" "${SWIFT_SRCS[@]}" \
   -framework AppKit -framework Foundation \
   -target x86_64-apple-macosx13.0
 lipo -create -output "$MACOS/$APP_NAME" "$MACOS/$APP_NAME-arm64" "$MACOS/$APP_NAME-x86_64"
