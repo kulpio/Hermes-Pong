@@ -44,4 +44,4 @@ EOF
 fi
 
 open "$DEST"
-echo "Launched Hermes Pong."
+echo "Launched Pong."
