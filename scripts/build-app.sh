@@ -1,18 +1,16 @@
 #!/bin/bash
-# Build Hermes Pong.app — native Swift menu bar + control panel (no Python runtime)
+# Build Pong.app (Agent-Pong) — native Swift menu bar + control panel
 # Usage: build-app.sh [--dev]
-#   --dev  embed project_root (points the Panel at this checkout's venv).
-#          Never use for release builds — it bakes in your local path.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="HermesPong"
-DISPLAY_NAME="Hermes Pong"
+APP_NAME="Pong"
+DISPLAY_NAME="Pong"
 APP="$ROOT/dist/${APP_NAME}.app"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RES="$CONTENTS/Resources"
-VERSION="1.3.1"
+VERSION="2.0.0-alpha"
 
 DEV=0
 [[ "${1:-}" == "--dev" ]] && DEV=1

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Pong CLI launcher — works from repo or ~/bin install
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# If installed to ~/bin/pong as a copy, look for sibling python package
+if [[ ! -d "$ROOT/python/pong" ]]; then
+  ROOT="$(cd "$(dirname "$0")/../src/Agent-Pong" 2>/dev/null && pwd)" || true
+fi
+# Prefer package next to this script's repo
+PKG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export PYTHONPATH="${PKG_ROOT}/python${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m pong.cli.main "$@"

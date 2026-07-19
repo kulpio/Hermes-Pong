@@ -3,12 +3,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="HermesPong.app"
+APP_NAME="Pong.app"
 SRC_APP="$ROOT/dist/$APP_NAME"
 DEST="/Applications/$APP_NAME"
 
 # Remove old names
-rm -rf /Applications/Hermes_Pairing.app /Applications/HermesClaude.app 2>/dev/null || true
+rm -rf /Applications/Hermes_Pairing.app /Applications/HermesClaude.app /Applications/HermesPong.app 2>/dev/null || true
 
 if [[ ! -d "$SRC_APP" ]]; then
   bash "$ROOT/scripts/build-app.sh"

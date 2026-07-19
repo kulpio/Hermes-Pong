@@ -1,13 +1,25 @@
 import AppKit
 import Foundation
 
-/// Hermes Pong — menu bar + control panel, all native Swift (no Python at runtime).
+/// Pong (Agent-Pong) — menu bar + control panel.
+/// Conductor-agnostic mission control (Grok recommended; Hermes/Claude/custom supported).
 
 // MARK: - Shared helpers (shell, AppleScript, state files, logging)
 
 enum Pong {
-    static var stateDir: String { NSHomeDirectory() + "/.hermes-pong" }
-    static var logPath: String { NSHomeDirectory() + "/Library/Logs/HermesPong.log" }
+    /// Prefer ~/.pong; fall back to legacy ~/.hermes-pong when that tree has data.
+    static var stateDir: String {
+        let primary = NSHomeDirectory() + "/.pong"
+        let legacy = NSHomeDirectory() + "/.hermes-pong"
+        let fm = FileManager.default
+        if fm.fileExists(atPath: primary) { return primary }
+        if let items = try? fm.contentsOfDirectory(atPath: legacy), !items.isEmpty {
+            return legacy
+        }
+        try? fm.createDirectory(atPath: primary, withIntermediateDirectories: true)
+        return primary
+    }
+    static var logPath: String { NSHomeDirectory() + "/Library/Logs/Pong.log" }
     static let extraPath = "/opt/homebrew/bin:/usr/local/bin:" + NSHomeDirectory() + "/bin"
 
     static func log(_ msg: String) {
@@ -117,11 +129,12 @@ enum PairState {
     static var settingsPath: String { Pong.stateDir + "/settings.json" }
 
     static func isPairName(_ s: String) -> Bool {
-        // View sessions are not pairs (Hermes view, legacy Claude view, worker views).
+        // View sessions are not pairs (conductor view, legacy Claude view, worker views).
         if s.hasSuffix("-h") || s.hasSuffix("-c") { return false }
-        // hermes-pair-w0 / hermes-pair-1-w2 — Phase 2 worker view sessions
+        // *-w0 / *-w2 — worker view sessions
         if s.range(of: #"-w\d+$"#, options: .regularExpression) != nil { return false }
-        return s == "hermes-claude" || s.hasPrefix("hermes-claude-")
+        return s == "pong-team" || s.hasPrefix("pong-team-")
+            || s == "hermes-claude" || s.hasPrefix("hermes-claude-")
             || s == "hermes-pair" || s.hasPrefix("hermes-pair-")
     }
 
@@ -138,10 +151,10 @@ enum PairState {
 
     static func nextPairName() -> String {
         let existing = Set(listPairs())
-        if !existing.contains("hermes-pair") { return "hermes-pair" }
-        for n in 1...50 where !existing.contains("hermes-pair-\(n)") { return "hermes-pair-\(n)" }
-        // legacy names still listed; don't reuse hermes-claude as default
-        return "hermes-pair-\(Int(Date().timeIntervalSince1970) % 10000)"
+        if !existing.contains("pong-team") { return "pong-team" }
+        for n in 1...50 where !existing.contains("pong-team-\(n)") { return "pong-team-\(n)" }
+        // legacy hermes-pair* still load; new teams use pong-team*
+        return "pong-team-\(Int(Date().timeIntervalSince1970) % 10000)"
     }
 
     /// Default per-pair access constraints (bans + freeform note).
@@ -192,7 +205,9 @@ enum PairState {
                               workerType: String? = nil,
                               workerLabel: String? = nil,
                               workerCmd: String? = nil,
-                              workers: [[String: Any]]? = nil) {
+                              workers: [[String: Any]]? = nil,
+                              conductor: [String: Any]? = nil,
+                              transportDefault: String? = nil) {
         var db = loadPairsDb()
         let prev = db[session] as? [String: Any] ?? [:]
         var ws = workers ?? (prev["workers"] as? [[String: Any]])
@@ -215,21 +230,42 @@ enum PairState {
         let mode = claudeMode
             ?? (ws?.first?["mode"] as? String)
             ?? (prev["claude_mode"] as? String) ?? "tmux"
+        // Conductor (v2): default Grok Build when creating fresh pairs
+        var cond: [String: Any] = {
+            if let conductor { return conductor }
+            if let prevC = prev["conductor"] as? [String: Any] { return prevC }
+            var d = ConductorType.resolved("grok").asDict()
+            d["window_id"] = hermesWindowId ?? prev["hermes_window_id"] ?? NSNull()
+            d["tmux_index"] = 0
+            d["mode"] = "tmux"
+            return d
+        }()
+        if let hermesWindowId {
+            cond["window_id"] = hermesWindowId
+        } else if cond["window_id"] == nil, let prevH = prev["hermes_window_id"] {
+            cond["window_id"] = prevH
+        }
         var entry: [String: Any] = [
-            "hermes_window_id": hermesWindowId ?? prev["hermes_window_id"] ?? NSNull(),
+            "schema_version": 2,
+            "conductor": cond,
+            "hermes_window_id": cond["window_id"] ?? hermesWindowId ?? prev["hermes_window_id"] ?? NSNull(),
+            "conductor_window_id": cond["window_id"] ?? NSNull(),
             "claude_window_id": primaryWid,
             "worker_window_id": primaryWid,
             "claude_mode": mode,
             "worker_type": primaryType,
             "worker_label": primaryLabel,
             "worker_cmd": primaryCmd,
+            "transport_default": transportDefault
+                ?? (prev["transport_default"] as? String)
+                ?? "job+paste",
             "autonomy_level": "full",
             "updated": Date().timeIntervalSince1970,
         ]
         if let ws, !ws.isEmpty {
             entry["workers"] = ws
         }
-        for k in ["view_hermes", "view_claude", "view_worker",
+        for k in ["view_hermes", "view_claude", "view_worker", "view_conductor",
                   "display_name", "colors", "project_root", "team_brief", "stowed"] {
             if let v = prev[k] { entry[k] = v }
         }
@@ -247,14 +283,68 @@ enum PairState {
         active["session"] = session
         Pong.writeJSON(activePath, active)
 
-        let reply = Pong.stateDir + "/last-claude.txt"
+        let reply = Pong.stateDir + "/last-reply.txt"
         if !FileManager.default.fileExists(atPath: reply) {
-            try? "(no Claude reply yet — run claude-delegate.py after Claude finishes a task)\n"
+            try? "(no worker reply yet — pong job create / pong delegate)\n"
                 .write(toFile: reply, atomically: true, encoding: .utf8)
         }
-        Pong.log("saved pair state \(session) \(entry)")
+        let legacyReply = Pong.stateDir + "/last-claude.txt"
+        if !FileManager.default.fileExists(atPath: legacyReply) {
+            try? "(no worker reply yet)\n".write(toFile: legacyReply, atomically: true, encoding: .utf8)
+        }
+        Pong.log("saved pair state \(session) conductor=\(cond["type"] ?? "?") \(entry)")
+        // Refresh bind card for conductor skills
+        Pong.sh("python3 \"$HOME/bin/hermes_pong.py\" write-bind --session \(session) >/dev/null 2>&1 || "
+            + "python3 \"$HOME/src/Agent-Pong/scripts/hermes_pong.py\" write-bind --session \(session) >/dev/null 2>&1 || true")
     }
 
+}
+
+// MARK: - Conductor types (who receives mission prompts)
+
+struct ConductorType: Equatable {
+    let id: String
+    let label: String
+    let cmd: String
+    /// Shown in New Team picker; Grok is recommended default.
+    let recommended: Bool
+
+    static let all: [ConductorType] = [
+        ConductorType(id: "grok", label: "Grok Build (recommended)", cmd: "grok", recommended: true),
+        ConductorType(id: "hermes", label: "Hermes Agent", cmd: "hermes chat", recommended: false),
+        ConductorType(id: "claude", label: "Claude Code", cmd: "claude", recommended: false),
+        ConductorType(id: "custom", label: "Custom command…", cmd: "", recommended: false),
+    ]
+
+    static func named(_ id: String) -> ConductorType {
+        all.first(where: { $0.id == id }) ?? all[0]
+    }
+
+    static func resolved(_ id: String) -> ConductorType {
+        var base = named(id)
+        let path = Pong.stateDir + "/conductors.json"
+        let db = Pong.loadJSON(path)
+        if let row = db[id] as? [String: Any], let cmd = row["cmd"] as? String, !cmd.isEmpty {
+            base = ConductorType(
+                id: base.id,
+                label: (row["label"] as? String) ?? base.label,
+                cmd: cmd,
+                recommended: base.recommended
+            )
+        }
+        return base
+    }
+
+    func asDict() -> [String: Any] {
+        [
+            "id": "c1",
+            "type": id,
+            "label": label.replacingOccurrences(of: " (recommended)", with: ""),
+            "cmd": cmd,
+            "mode": "tmux",
+            "tmux_index": 0,
+        ]
+    }
 }
 
 // MARK: - Worker types (Phase 1: one worker per Hermes; army comes later)
@@ -778,9 +868,13 @@ enum TerminalTheme {
         }
         let hToken = viewToken(pair: pair, role: "hermes")
         let hid = resolvePairWindow(stored: storedH, viewToken: hToken)
-        apply(windowId: hid, displayTitle: "Hermes · \(hermesLabel)", viewToken: hToken,
+        let condType = (entry["conductor"] as? [String: Any])?["type"] as? String
+        let condLabel = (entry["conductor"] as? [String: Any])?["label"] as? String
+        let hubTitle = "\(condLabel ?? "Conductor") · \(hermesLabel)"
+        apply(windowId: hid, displayTitle: hubTitle, viewToken: hToken,
               colors: hColors, profile: profileName(pair: pair, role: "hermes"))
-        tmuxTitle(baseSession: pair, tmuxIndex: 0, displayTitle: "Hermes · \(hermesLabel)")
+        tmuxTitle(baseSession: pair, tmuxIndex: 0, displayTitle: hubTitle)
+        _ = condType // reserved for future per-conductor chrome
 
         var ws = Workers.list(from: entry)
         var changed = false
@@ -1232,17 +1326,29 @@ enum Pairing {
         return false
     }
 
-    /// New pair: Hermes + one or more workers (Phase 2).
+    /// New team: conductor (default Grok) + one or more workers.
     static func startFresh(worker: WorkerType = WorkerType.named("claude")) -> String {
-        startFresh(workers: [worker])
+        startFresh(workers: [worker], conductor: ConductorType.resolved("grok"))
     }
 
-    static func startFresh(workers: [WorkerType]) -> String {
+    static func startFresh(workers: [WorkerType], conductor: ConductorType = ConductorType.resolved("grok")) -> String {
         var list = workers
         if list.isEmpty { list = [WorkerType.named("claude")] }
         let name = PairState.nextPairName()
         let pathExport = "export PATH=/opt/homebrew/bin:/usr/local/bin:$HOME/bin:$HOME/.local/bin:$PATH"
         let viewH = "\(name)-h"
+        let cond = conductor
+        let condLabel = cond.label.replacingOccurrences(of: " (recommended)", with: "")
+        let condCmdRaw = cond.cmd.trimmingCharacters(in: .whitespacesAndNewlines)
+        let condCmd = condCmdRaw.isEmpty ? "grok" : condCmdRaw
+        let safeCondCmd = condCmd.replacingOccurrences(of: "'", with: "'\\''")
+        let skillHint: String = {
+            switch cond.id {
+            case "grok": return "grok-pong-bridge"
+            case "hermes": return "hermes-pong-bridge"
+            default: return "pong-bridge"
+            }
+        }()
 
         var toKill = [name, viewH, "\(name)-c"]
         for i in 0..<max(list.count, 8) { toKill.append("\(name)-w\(i)") }
@@ -1250,15 +1356,16 @@ enum Pairing {
             Pong.sh("tmux has-session -t \(s) 2>/dev/null && tmux kill-session -t \(s) || true")
         }
 
-        Pong.sh("tmux new-session -d -s \(name) -n Hermes")
-        // Team identity in the tmux session env: every pane created below
-        // inherits it, so gate/delegate bind to THIS pair even when several
-        // hermes-pair* sessions are live.
+        Pong.sh("tmux new-session -d -s \(name) -n Conductor")
+        // Team identity: PONG_SESSION (+ legacy HERMES_PONG_SESSION for old skills)
+        Pong.sh("tmux set-environment -t \(name) PONG_SESSION \(name)")
         Pong.sh("tmux set-environment -t \(name) HERMES_PONG_SESSION \(name)")
+        Pong.sh("tmux set-environment -t \(name) PONG_ROLE conductor")
         Pong.sh("tmux set-environment -t \(name) HERMES_PONG_ROLE orchestra")
-        let orchestraEnv = "export HERMES_PONG_SESSION=\(name) HERMES_PONG_ROLE=orchestra"
-        let writeBind = "python3 $HOME/bin/hermes_pong.py write-bind --session \(name) >/dev/null 2>&1 || true"
-        Pong.sh("tmux send-keys -t \(name):0 -l '\(pathExport); \(orchestraEnv); \(writeBind); printf \"\\n  HERMES ORCHESTRA · \(name):0\\n  bind: ~/.hermes-pong/binds/\(name).md · load skill hermes-pong-bridge\\n\\n\"; hermes'")
+        let orchestraEnv = "export PONG_SESSION=\(name) HERMES_PONG_SESSION=\(name) PONG_ROLE=conductor HERMES_PONG_ROLE=orchestra"
+        let writeBind = "python3 $HOME/bin/hermes_pong.py write-bind --session \(name) >/dev/null 2>&1 || python3 $HOME/bin/pong status -s \(name) >/dev/null 2>&1 || true"
+        let banner = "CONDUCTOR · \(condLabel) · \(name):0"
+        Pong.sh("tmux send-keys -t \(name):0 -l '\(pathExport); \(orchestraEnv); \(writeBind); printf \"\\n  \(banner)\\n  skill: \(skillHint) · pong gate · pong job create\\n\\n\"; \(safeCondCmd)'")
         usleep(80_000)
         Pong.sh("tmux send-keys -t \(name):0 Enter")
 
@@ -1269,8 +1376,8 @@ enum Pairing {
             let winName = list.count == 1 ? "Worker" : "W\(idx + 1)"
             Pong.sh("tmux new-window -t \(name) -n \(winName)")
             let safeCmd = launchCmd.replacingOccurrences(of: "'", with: "'\\''")
-            let banner = "WORKER · \(worker.label) · \(name):\(idx + 1)"
-            Pong.sh("tmux send-keys -t \(name):\(idx + 1) -l '\(pathExport); printf \"\\n  \(banner)\\n\\n\"; \(safeCmd)'")
+            let wbanner = "WORKER · \(worker.label) · \(name):\(idx + 1)"
+            Pong.sh("tmux send-keys -t \(name):\(idx + 1) -l '\(pathExport); export PONG_SESSION=\(name) HERMES_PONG_SESSION=\(name); printf \"\\n  \(wbanner)\\n\\n\"; \(safeCmd)'")
             usleep(80_000)
             Pong.sh("tmux send-keys -t \(name):\(idx + 1) Enter")
             workerRecords.append([
@@ -1367,6 +1474,9 @@ enum Pairing {
         let primaryWid = windowIds.first(where: { Int($0) != nil })
         let teamLabel = list.count == 1 ? list[0].label : "\(list.count) workers"
 
+        var condDict = cond.asDict()
+        condDict["window_id"] = hid ?? NSNull()
+        condDict["cmd"] = condCmd
         PairState.savePairState(
             name,
             hermesWindowId: hid,
@@ -1375,7 +1485,9 @@ enum Pairing {
             workerType: list[0].id,
             workerLabel: teamLabel,
             workerCmd: list[0].cmd.isEmpty ? "claude" : list[0].cmd,
-            workers: workerRecords
+            workers: workerRecords,
+            conductor: condDict,
+            transportDefault: "job+paste"
         )
         var active = Pong.loadJSON(PairState.activePath)
         active["session"] = name
@@ -2090,16 +2202,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func newPair() {
-        guard let workers = Self.pickWorkerTypes() else { return }
-        if workers.isEmpty {
-            // Saved team already spawned inside picker
+        guard let (conductor, workers) = Self.pickTeamLaunch() else {
             lastSessionPoll = .distantPast
             rebuildMenu()
             PanelController.shared.refreshUI()
             return
         }
+        if workers.isEmpty { return }
         DispatchQueue.global(qos: .userInitiated).async {
-            _ = Pairing.startFresh(workers: workers)
+            _ = Pairing.startFresh(workers: workers, conductor: conductor)
             DispatchQueue.main.async { [weak self] in
                 self?.lastSessionPoll = .distantPast
                 self?.rebuildMenu()
@@ -2108,44 +2219,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// New pair worker selection.
-    /// Always one Hermes session. Single worker or army under that Hermes — never separate pair rows.
-        /// Returns workers to launch, OR nil if cancelled.
-    /// New pair: Claude · Other Model · Team · Cancel
-    static func pickWorkerTypes() -> [WorkerType]? {
+    /// Pick conductor first (Grok recommended), then workers.
+    /// Returns (conductor, workers) or nil if cancelled.
+    static func pickTeamLaunch() -> (ConductorType, [WorkerType])? {
         NSApp.activate(ignoringOtherApps: true)
         let saved = SavedTeams.loadAll()
+
+        let condAlert = NSAlert()
+        condAlert.messageText = "New team — conductor"
+        condAlert.informativeText =
+            "Who receives your mission prompts?\n" +
+            "Grok Build is recommended for coding teams. Hermes users can pick Hermes — no Grok required.\n" +
+            "Workers (Claude, etc.) stay separate terminals you can jump into."
+        for c in ConductorType.all where c.id != "custom" {
+            condAlert.addButton(withTitle: c.label)
+        }
+        condAlert.addButton(withTitle: "Custom…")
+        if !saved.isEmpty {
+            condAlert.addButton(withTitle: "Show Teams")
+        }
+        condAlert.addButton(withTitle: "Cancel")
+        let cr = condAlert.runModal()
+        let first = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        let idx = cr.rawValue - first
+        let fixed = ConductorType.all.filter { $0.id != "custom" }
+        var conductor = ConductorType.resolved("grok")
+        if idx >= 0 && idx < fixed.count {
+            conductor = ConductorType.resolved(fixed[idx].id)
+        } else if idx == fixed.count {
+            // Custom conductor cmd
+            let a2 = NSAlert()
+            a2.messageText = "Custom conductor command"
+            a2.informativeText = "Shell command for the conductor TUI (e.g. grok, hermes chat)."
+            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+            field.stringValue = "grok"
+            a2.accessoryView = field
+            a2.addButton(withTitle: "Use")
+            a2.addButton(withTitle: "Cancel")
+            guard a2.runModal() == .alertFirstButtonReturn else { return nil }
+            let cmd = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if cmd.isEmpty { return nil }
+            conductor = ConductorType(id: "custom", label: cmd, cmd: cmd, recommended: false)
+        } else if !saved.isEmpty && idx == fixed.count + 1 {
+            TeamsManagerPanel.shared.show { PanelController.shared.refreshUI() }
+            return nil
+        } else {
+            return nil
+        }
+
         let gate = NSAlert()
-        gate.messageText = "New pair"
-        gate.informativeText = saved.isEmpty
-            ? "Always one Hermes. Pick how to staff it.\n(Save a team from an Active pair to enable Show Teams.)"
-            : "Always one Hermes.\nShow Teams = manage / open saved teams (\(saved.count) saved)."
+        gate.messageText = "Staff workers"
+        gate.informativeText = "Conductor: \(conductor.label)\nAdd workers under this team (implementers)."
         gate.addButton(withTitle: "Claude")
         gate.addButton(withTitle: "Other Model")
         gate.addButton(withTitle: "Team")
-        if !saved.isEmpty {
-            gate.addButton(withTitle: "Show Teams")
-        }
         gate.addButton(withTitle: "Cancel")
         let g = gate.runModal()
-        let first = NSApplication.ModalResponse.alertFirstButtonReturn
-        if g == first {
-            return [WorkerType.resolved("claude")]
+        let gf = NSApplication.ModalResponse.alertFirstButtonReturn
+        if g == gf {
+            return (conductor, [WorkerType.resolved("claude")])
         }
-        if g == NSApplication.ModalResponse(rawValue: first.rawValue + 1) {
-            return TeamBuilderPanel.run(mode: .oneModel)
+        if g == NSApplication.ModalResponse(rawValue: gf.rawValue + 1) {
+            guard let ws = TeamBuilderPanel.run(mode: .oneModel) else { return nil }
+            return (conductor, ws)
         }
-        if g == NSApplication.ModalResponse(rawValue: first.rawValue + 2) {
-            return TeamBuilderPanel.run(mode: .team)
-        }
-        if !saved.isEmpty && g == NSApplication.ModalResponse(rawValue: first.rawValue + 3) {
-            // Open manager; if user launches from there, empty workers = already spawned handled by refresh
-            TeamsManagerPanel.shared.show {
-                PanelController.shared.refreshUI()
-            }
-            return nil
+        if g == NSApplication.ModalResponse(rawValue: gf.rawValue + 2) {
+            guard let ws = TeamBuilderPanel.run(mode: .team) else { return nil }
+            return (conductor, ws)
         }
         return nil
+    }
+
+    /// New pair worker selection (legacy helper).
+    static func pickWorkerTypes() -> [WorkerType]? {
+        pickTeamLaunch()?.1
     }
 
     static func pickWorkerType() -> WorkerType? {
@@ -2687,7 +2834,11 @@ final class PanelController: NSObject {
                 action: #selector(hermesColorPressed(_:))
             ))
             hermesRow.addSubview(nameButton(
-                "Hermes · \(hermesTitle)",
+                {
+                    let c = entry["conductor"] as? [String: Any]
+                    let cl = (c?["label"] as? String) ?? "Conductor"
+                    return "\(cl) · \(hermesTitle)"
+                }(),
                 frame: NSRect(x: 28, y: 34, width: 196, height: 24),
                 id: name,
                 action: #selector(hermesNamePressed(_:))
@@ -2819,14 +2970,13 @@ final class PanelController: NSObject {
     }
 
     @objc private func newPairPressed(_ sender: NSButton) {
-        guard let workers = AppDelegate.pickWorkerTypes() else { return }
-        if workers.isEmpty {
-            // Saved team already spawned
+        guard let (conductor, workers) = AppDelegate.pickTeamLaunch() else {
             refreshUI()
             return
         }
+        if workers.isEmpty { return }
         DispatchQueue.global(qos: .userInitiated).async {
-            let name = Pairing.startFresh(workers: workers)
+            let name = Pairing.startFresh(workers: workers, conductor: conductor)
             usleep(200_000)
             DispatchQueue.main.async {
                 self.refreshUI()
