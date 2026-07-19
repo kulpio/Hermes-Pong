@@ -66,11 +66,11 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>Hermes Pong</string>
+  <string>${DISPLAY_NAME}</string>
   <key>CFBundleDisplayName</key>
-  <string>Hermes Pong</string>
+  <string>${DISPLAY_NAME}</string>
   <key>CFBundleIdentifier</key>
-  <string>com.kulpio.hermes-pong</string>
+  <string>com.kulpio.pong</string>
   <key>CFBundleVersion</key>
   <string>$VERSION</string>
   <key>CFBundleShortVersionString</key>
@@ -78,7 +78,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleExecutable</key>
-  <string>HermesPong</string>
+  <string>${APP_NAME}</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>LSMinimumSystemVersion</key>
@@ -88,15 +88,17 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSAppleEventsUsageDescription</key>
-  <string>Hermes Pong controls Terminal to pair Hermes and Claude Code sessions.</string>
+  <string>Pong controls Terminal windows to pair conductor and worker AI sessions.</string>
 </dict>
 </plist>
 PLIST
 
 echo -n "APPL????" > "$CONTENTS/PkgInfo"
 
-# Ad-hoc sign for dev, no --deep (release signing is separate).
-codesign -s - --force "$APP" 2>/dev/null || true
+# Ad-hoc sign for local open (executable name MUST match CFBundleExecutable).
+# Fail the build if signing fails — unsigned/mismatched bundles show as "damaged".
+codesign --force --deep --sign - "$APP"
+codesign --verify --deep --strict "$APP"
 echo "hint: ad-hoc signed (dev). Release builds: bash scripts/sign-notarize.sh"
 
 # Release bundles must not leak the local user path.
