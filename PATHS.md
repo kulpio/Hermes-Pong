@@ -16,9 +16,13 @@ Quick index of project, brand, landing, app, and install locations.
 
 | What | URL / path |
 |------|------------|
-| Repo | https://github.com/kulpio/CyberPong |
+| Repo (public) | https://github.com/kulpio/CyberPong |
 | Clone | https://github.com/kulpio/CyberPong.git |
-| Remote name | `origin` |
+| Landing | https://kulpio.github.io/CyberPong/ |
+| Latest zip | https://github.com/kulpio/CyberPong/releases/latest/download/CyberPong-macOS.zip |
+| Remote `origin` | `https://github.com/kulpio/CyberPong.git` |
+| Remote `agent` | private mirror `https://github.com/kulpio/Agent-Pong.git` (optional) |
+| Former names | `Hermes-Pong` (renamed → CyberPong; GitHub redirects) · private `Agent-Pong` |
 
 ---
 
