@@ -16,8 +16,8 @@ Quick index of project, brand, landing, app, and install locations.
 
 | What | URL / path |
 |------|------------|
-| Repo | https://github.com/kulpio/Agent-Pong |
-| Clone | https://github.com/kulpio/Agent-Pong.git |
+| Repo | https://github.com/kulpio/CyberPong |
+| Clone | https://github.com/kulpio/CyberPong.git |
 | Remote name | `origin` |
 
 ---

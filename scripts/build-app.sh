@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build Pong.app (Agent-Pong) — native Swift menu bar + control panel
+# Build CyberPong.app — native Swift menu bar + control panel
 # Usage: build-app.sh [--dev]
 set -euo pipefail
 

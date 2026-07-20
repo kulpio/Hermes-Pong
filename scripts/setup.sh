@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install Pong (Agent-Pong) — control plane CLIs + optional macOS app
+# Install CyberPong — control plane CLIs + optional macOS app
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -97,4 +97,4 @@ echo ""
 echo "Done — Pong 2.0.0-alpha"
 echo "  pong status | pong gate | pong job create --worker w1 --task '…'"
 echo "  State: ~/.pong   Docs: docs/ARCHITECTURE.md"
-echo "  Repo:  https://github.com/kulpio/Agent-Pong (private)"
+echo "  Repo:  https://github.com/kulpio/CyberPong"
