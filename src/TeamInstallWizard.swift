@@ -559,14 +559,14 @@ final class TeamInstallWizard: NSObject, NSWindowDelegate {
 
     private func pageArchitecture() {
         let intro = wrap(
-            "Drag seats · + adds peer/sub · Link: click source then target · click arrow mid-line to set what it does · double-click model · drag into SUB to nest.",
+            "Drag seats · + / Link: source then destination (existing) · drag dotted ends to rewire · × or Delete removes agents · mid-arrow sets kind · drag into SUB to nest.",
             frame: NSRect(x: 28, y: H - 118, width: W - 200, height: 36)
         )
         content.addSubview(intro)
 
         let linkBtn = pill("Link seats…", #selector(toggleArchLinkMode))
         linkBtn.frame = NSRect(x: W - 150, y: H - 112, width: 120, height: 28)
-        linkBtn.toolTip = "Two-click: source → target, then choose what the link does"
+        linkBtn.toolTip = "Click source, then destination seat — does not create a new agent"
         content.addSubview(linkBtn)
 
         let canvas = TeamArchCanvas(frame: NSRect(x: 28, y: 70, width: W - 56, height: H - 200))

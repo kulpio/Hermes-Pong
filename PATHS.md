@@ -16,11 +16,11 @@ Quick index of project, brand, landing, app, and install locations.
 
 | What | URL / path |
 |------|------------|
-| Repo (public) | https://github.com/kulpio/CyberPong |
-| Clone | https://github.com/kulpio/CyberPong.git |
-| Landing | https://kulpio.github.io/CyberPong/ |
-| Latest zip | https://github.com/kulpio/CyberPong/releases/latest/download/CyberPong-macOS.zip |
-| Remote `origin` | `https://github.com/kulpio/CyberPong.git` |
+| Repo (public) | https://github.com/kulpio/hermes-pong |
+| Clone | https://github.com/kulpio/hermes-pong.git |
+| Landing | https://kulpio.github.io/hermes-pong/ |
+| Latest zip | https://github.com/kulpio/hermes-pong/releases/latest/download/CyberPong-macOS.zip |
+| Remote `origin` | `https://github.com/kulpio/hermes-pong.git` |
 | Remote `agent` | private mirror `https://github.com/kulpio/Agent-Pong.git` (optional) |
 | Former names | `Hermes-Pong` (renamed → CyberPong; GitHub redirects) · private `Agent-Pong` |
 

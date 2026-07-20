@@ -441,8 +441,8 @@ final class FlowDesignSheetController: NSObject {
         root.addSubview(teamPop)
 
         hintLabel = NSTextField(wrappingLabelWithString:
-            "Pick a team above. Click seats freely. Link seats… → source then target. " +
-            "Click mid-arrow to set what it does. Esc cancels link.")
+            "Pick a team. Link seats… → source then destination (existing only). " +
+            "Drag dotted ends to rewire. × or Delete removes an agent. Mid-arrow sets kind.")
         hintLabel.font = PongTheme.font(11)
         hintLabel.textColor = PongTheme.textSecondary
         hintLabel.frame = NSRect(x: 24, y: h - 96, width: w - 180, height: 40)
@@ -453,6 +453,7 @@ final class FlowDesignSheetController: NSObject {
         linkBtn.bezelStyle = .rounded
         linkBtn.frame = NSRect(x: w - 140, y: h - 90, width: 116, height: 28)
         linkBtn.autoresizingMask = [.minXMargin, .minYMargin]
+        linkBtn.toolTip = "Click source seat, then destination — does not create a new agent"
         root.addSubview(linkBtn)
 
         canvas = TeamArchCanvas(frame: NSRect(x: 16, y: 52, width: w - 32, height: h - 160))
@@ -460,6 +461,10 @@ final class FlowDesignSheetController: NSObject {
         canvas.allowAddSeats = false
         canvas.onChanged = { [weak self] in
             self?.persistFromCanvas()
+        }
+        canvas.onDeleteSeat = { [weak self] id in
+            guard let self, !self.session.isEmpty else { return false }
+            return Workers.removeWorker(pair: self.session, workerId: id)
         }
         root.addSubview(canvas)
 
