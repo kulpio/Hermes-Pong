@@ -1307,7 +1307,9 @@ enum TerminalTheme {
             """
         }
 
-        // Prefer ASCII hyphen in the title bar — unicode middot can trip some AppleScript paths
+        // ASCII hyphen in the title bar (Team - Agent)
+        // NOTE: do NOT reference "title displays active process name" — it is a *syntax*
+        // error on current Terminal (not merely runtime), which aborted the whole apply.
         let barTitle = safeTitle
             .replacingOccurrences(of: " · ", with: " - ")
             .replacingOccurrences(of: "·", with: "-")
@@ -1316,7 +1318,6 @@ enum TerminalTheme {
           try
             set W to window id \(wid)
             set T to selected tab of W
-            -- Only custom title: "Team - Agent" — hide path / process / attach chrome
             set title displays custom title of T to true
             set title displays device name of T to false
             set title displays shell path of T to false
@@ -1324,19 +1325,11 @@ enum TerminalTheme {
             try
               set title displays file name of T to false
             end try
-            try
-              set title displays settings name of T to false
-            end try
-            try
-              set title displays active process name of T to false
-            end try
             set custom title of T to "\(barTitle)"
             \(colorLines)
-            -- Also stamp the settings set so process name stays off for this profile
             try
               set S to current settings of T
               set title displays custom title of S to true
-              set title displays active process name of S to false
               set title displays device name of S to false
               set title displays shell path of S to false
               set title displays window size of S to false
@@ -1348,23 +1341,15 @@ enum TerminalTheme {
         end tell
         """
         let out = Pong.appleScript(source)
-        // Second pass: process name often reappears after tmux attaches
+        // Second pass after tmux settles (custom title only — keep script compilable)
         if out == "OK" || out.isEmpty || out.hasPrefix("OK") {
-            usleep(120_000)
+            usleep(150_000)
             _ = Pong.appleScript("""
             tell application "Terminal"
               try
-                set W to window id \(wid)
-                set T to selected tab of W
-                try
-                  set title displays active process name of T to false
-                end try
+                set T to selected tab of window id \(wid)
+                set title displays custom title of T to true
                 set custom title of T to "\(barTitle)"
-                try
-                  set S to current settings of T
-                  set title displays active process name of S to false
-                  set title displays custom title of S to true
-                end try
               end try
             end tell
             """)
