@@ -603,7 +603,7 @@ enum Workers {
         let view = "\(pair)-w\(actualIdx - 1)"
         Pong.sh("tmux has-session -t \(view) 2>/dev/null || tmux new-session -d -s \(view) -t \(pair)")
         Pong.sh("tmux select-window -t \(view):\(actualIdx) 2>/dev/null || tmux select-window -t \(pair):\(actualIdx)")
-        let newId = Pairing.openAttachSession(view)
+        let newId = Pairing.openAttachSession(view, displayTitle: seatExact)
 
         let rec = makeWorker(
             id: id,
@@ -1149,6 +1149,28 @@ enum TerminalTheme {
         return nil
     }
 
+    /// True if this window is a CyberPong attach client we are allowed to theme.
+    /// Accepts attach-session token, PONGATTACH marker, or exact pong.<session>.seat title.
+    static func isThemeableTitle(_ title: String, viewToken: String, displayTitle: String) -> Bool {
+        let t = title.lowercased()
+        if t.contains("hermes ▸") || t.contains("grok ▸") {
+            // Free floating agent apps — never restyle as pair panes
+            if !t.contains("attach-session") && !t.contains("pongattach:") && !t.contains("pong.") {
+                return false
+            }
+        }
+        if isPairAttachTitle(title, viewToken: viewToken) { return true }
+        if t.contains("pongattach:\(viewToken.lowercased())") { return true }
+        if t.contains("pongattach:") && t.contains(viewToken.lowercased()) { return true }
+        let want = displayTitle.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !want.isEmpty, t == want || t.contains(want) { return true }
+        // Fresh .command launch often titles itself after the script name / “bash”
+        if t.contains("tmux") || t.contains(".command") || t.contains("bash") || t.isEmpty {
+            return true
+        }
+        return false
+    }
+
     /// Title + colors on ONE pair pane. Uses NSAppleScript + tab properties.
     /// colors.highlight = Marker accent (bold + cursor). Terminal has no title-bar color API.
     static func apply(windowId: String?, displayTitle: String, viewToken: String, colors: Colors?, profile: String) {
@@ -1157,9 +1179,7 @@ enum TerminalTheme {
             return
         }
         if let title = listWindows().first(where: { $0.id == wid })?.title {
-            let t = title.lowercased()
-            let needle = "attach-session -t \(viewToken)".lowercased()
-            if t.contains("hermes ▸") || !t.contains(needle) {
+            if !isThemeableTitle(title, viewToken: viewToken, displayTitle: displayTitle) {
                 Pong.log("theme APPLY BLOCKED window=\(wid) token=\(viewToken) title=\(title)")
                 return
             }
@@ -1183,6 +1203,13 @@ enum TerminalTheme {
             on error
               set theme to make new settings set with properties {name:setName}
             end try
+            -- Close cleanly when the attach client detaches; never ask “terminate processes?”
+            try
+              set close if shell exited cleanly of theme to true
+            end try
+            try
+              set prompt before closing of theme to never
+            end try
             set background color of theme to \(bg)
             set normal text color of theme to \(tx)
             set bold text color of theme to \(win)
@@ -1192,6 +1219,17 @@ enum TerminalTheme {
             set normal text color of T to \(tx)
             set bold text color of T to \(win)
             set cursor color of T to \(win)
+            """
+        } else {
+            // Still prefer close-on-exit even without custom colors
+            colorLines = """
+
+            try
+              set close if shell exited cleanly of current settings of T to true
+            end try
+            try
+              set prompt before closing of current settings of T to never
+            end try
             """
         }
 
@@ -1791,7 +1829,11 @@ enum Pairing {
     /// Critical: plain `do script` often opens as a *tab on the front Terminal*
     /// (e.g. a free-floating Grok window). That made Open raise the wrong app.
     /// Launching a `.command` file via `open` always gets its own window.
-    static func openAttachSession(_ viewSession: String) -> String? {
+    ///
+    /// Closing this window only detaches the client — tmux (and Claude/Grok) keep running.
+    /// - Parameter displayTitle: preferred custom title (e.g. `pong.session.w1`) so the
+    ///   window does not sit on the frosted “tmux attach-session” chrome.
+    static func openAttachSession(_ viewSession: String, displayTitle: String? = nil) -> String? {
         let safe = viewSession
             .replacingOccurrences(of: "'", with: "")
             .replacingOccurrences(of: "\"", with: "")
@@ -1802,33 +1844,34 @@ enum Pairing {
         let before = Set(TerminalTheme.listWindows().map(\.id))
         Pong.log("openAttachSession begin view=\(safe) tmux=\(tmux) beforeWindows=\(before.count)")
 
-        // Unique marker so we never confuse this with a free Grok TUI window.
-        // On ANY exit (detach, session death, missing session) close ONLY windows
-        // carrying this marker — never "front window". Drop `exec` so the script
-        // regains control and the EXIT trap can run (no zombie "[Process completed]").
+        // Unique marker for recovery; display title is what the user should see.
         let marker = "PONGATTACH:\(safe)"
+        let shown = (displayTitle?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? safe
+        let safeShown = shown
+            .replacingOccurrences(of: "'", with: "")
+            .replacingOccurrences(of: "\"", with: "")
+            .replacingOccurrences(of: "\\", with: "")
         let dir = NSTemporaryDirectory() + "pong-attach/"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let path = dir + "\(safe)-\(Int(Date().timeIntervalSince1970)).command"
+        // No EXIT trap that force-closes Terminal (that triggered “terminate processes?”).
+        // exec tmux → one process; detach/close only drops this client; agents stay in base session.
         let body = """
         #!/bin/bash
         export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/bin:$HOME/.local/bin:$PATH"
-        MARK='\(marker)'
-        printf '\\033]0;%s\\007' "$MARK"
-        close_self() {
-          # Re-assert marker (tmux overwrites the title while attached), then close
-          # only windows with our unique mark — never "front window".
-          printf '\\033]0;%s\\007' "$MARK"
-          osascript -e 'tell application "Terminal" to close (every window whose name contains "'"$MARK"'")' >/dev/null 2>&1 || true
-        }
-        trap close_self EXIT
+        # Title: seat identity first (looks like a real agent pane, not “tmux attach…”)
+        printf '\\033]0;%s\\007' '\(safeShown)'
+        # Keep marker in the process environment for recovery scripts
+        export PONG_ATTACH_MARK='\(marker)'
         if ! "\(tmux)" has-session -t "\(safe)" 2>/dev/null; then
           echo "CyberPong: tmux session '\(safe)' not found — seat may be dead." >&2
-          sleep 0.6
-          exit 1
+          printf '\\033]0;%s\\007' '\(safeShown) · offline'
+          sleep 0.8
+          exit 0
         fi
-        "\(tmux)" attach-session -t "\(safe)"
-        # detach / kill / fail → EXIT trap closes this window
+        # Client-only attach. Closing the window detaches; base session keeps Claude/Grok alive.
+        "\(tmux)" set-option -t "\(safe)" destroy-unattached off 2>/dev/null || true
+        exec "\(tmux)" attach-session -t "\(safe)"
         """
         do {
             try body.write(toFile: path, atomically: true, encoding: .utf8)
@@ -1844,41 +1887,44 @@ enum Pairing {
 
         func matchesOurAttach(_ title: String) -> Bool {
             let t = title.lowercased()
-            if t.contains("grok ▸") || t.contains("hermes ▸") { return false }
+            if t.contains("grok ▸") || t.contains("hermes ▸") {
+                if !t.contains("attach-session") && !t.contains("pong.") { return false }
+            }
             if t.contains(marker.lowercased()) { return true }
-            return TerminalTheme.isPairAttachTitle(title, viewToken: safe)
+            if t.contains(safeShown.lowercased()) { return true }
+            if TerminalTheme.isPairAttachTitle(title, viewToken: safe) { return true }
+            // Brand-new .command window still bootstrapping
+            if t.contains(".command") || t.contains("tmux") || t.contains(safe.lowercased()) { return true }
+            return false
         }
 
         var found: String?
-        for attempt in 1...20 {
-            usleep(150_000)
+        for attempt in 1...24 {
+            usleep(120_000)
             let after = TerminalTheme.listWindows()
-            // Only brand-new windows that look like our attach
             if let fresh = after.first(where: { !before.contains($0.id) && matchesOurAttach($0.title) }) {
                 found = fresh.id
                 Pong.log("openAttachSession \(safe) → \(fresh.id) (new attempt=\(attempt)) title=\(fresh.title)")
                 break
             }
-            // New window still renaming
-            if attempt >= 4, let fresh = after.last(where: { !before.contains($0.id) }) {
+            if attempt >= 3, let fresh = after.last(where: { !before.contains($0.id) }) {
                 Pong.log("openAttachSession pending id=\(fresh.id) title=\(fresh.title) attempt=\(attempt)")
-                if matchesOurAttach(fresh.title) {
+                if matchesOurAttach(fresh.title) || attempt >= 8 {
                     found = fresh.id
                     break
                 }
             }
         }
         if let found {
-            _ = raiseOnlyIfPairAttach(found, viewToken: safe)
-                || {
-                    // Title may still be marker-only before tmux retitles
-                    let title = TerminalTheme.listWindows().first(where: { $0.id == found })?.title ?? ""
-                    if matchesOurAttach(title) {
-                        raiseTerminalWindow(found)
-                        return true
-                    }
-                    return false
-                }()
+            // Theme immediately so the frosted “tmux attach” chrome never sticks
+            TerminalTheme.apply(
+                windowId: found,
+                displayTitle: safeShown,
+                viewToken: safe,
+                colors: nil,
+                profile: TerminalTheme.profileName(pair: safe, role: "attach")
+            )
+            raiseTerminalWindow(found)
             return found
         }
         let titles = TerminalTheme.listWindows().map { "\($0.id):\($0.title)" }.joined(separator: " || ")
@@ -2128,10 +2174,9 @@ enum Pairing {
         // Open Terminals one-by-one via .command launchers (never tab onto a free Grok window).
         let baselineWindows = Set(TerminalTheme.listWindows().map(\.id))
         var usedWindowIds = Set<String>()
-        func openAttach(_ session: String) -> String? {
-            guard let id = openAttachSession(session), !usedWindowIds.contains(id) else {
-                // Retry once if id collision
-                if let id = openAttachSession(session) {
+        func openAttach(_ session: String, title: String) -> String? {
+            guard let id = openAttachSession(session, displayTitle: title), !usedWindowIds.contains(id) else {
+                if let id = openAttachSession(session, displayTitle: title) {
                     usedWindowIds.insert(id)
                     return id
                 }
@@ -2140,27 +2185,32 @@ enum Pairing {
             usedWindowIds.insert(id)
             return id
         }
-        let hid = openAttach(viewH)
+        let condExactTitle = TerminalTheme.exactSeatTitle(pair: name, seat: "c1")
+        let hid = openAttach(viewH, title: condExactTitle)
         var windowIds: [String] = []
-        for vn in viewNames {
-            windowIds.append(openAttach(vn) ?? "")
+        for (idx, vn) in viewNames.enumerated() {
+            let seatId = "w\(idx + 1)"
+            let seatTitle = TerminalTheme.exactSeatTitle(pair: name, seat: seatId)
+            windowIds.append(openAttach(vn, title: seatTitle) ?? "")
         }
-        // Close accidental blank windows created during launch
+        // Close accidental blank / duplicate launch chrome windows (not our themed seats)
         let afterAll = TerminalTheme.listWindows()
         for w in afterAll where !baselineWindows.contains(w.id) && !usedWindowIds.contains(w.id) {
             let t = w.title.lowercased()
-            if t.contains("tmux") || t.contains("hermes") || t.contains("worker")
-                || t.contains("claude") || t.contains("grok") || t.contains("kimi") {
-                continue
+            // Keep anything already named as a pong seat or PONGATTACH client
+            if t.contains("pong.") || t.contains("pongattach:") { continue }
+            // Drop leftover frosted bash/.command/login shells from open
+            if t.contains(".command") || t.contains("login") || t.isEmpty
+                || t.contains("bash") || (t.contains("tmux") && !t.contains("attach-session -t \(name.lowercased())")) {
+                _ = Pong.osascript("""
+                tell application "Terminal"
+                  try
+                    close window id \(w.id) saving no
+                  end try
+                end tell
+                """)
+                Pong.log("closed stray Terminal window \(w.id) title=\(w.title)")
             }
-            _ = Pong.osascript("""
-            tell application "Terminal"
-              try
-                close window id \(w.id)
-              end try
-            end tell
-            """)
-            Pong.log("closed stray Terminal window \(w.id) title=\(w.title)")
         }
         while windowIds.count < workerRecords.count { windowIds.append("") }
         for i in 0..<workerRecords.count {

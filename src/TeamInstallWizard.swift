@@ -970,21 +970,34 @@ enum TeamWizardApply {
             let entry = PairState.loadPairsDb()[session] as? [String: Any] ?? [:]
             FlowGraph.save(pair: session, edges: FlowGraph.defaultEdges(entry: entry))
         }
-        // parent_id from architecture canvas
-        if plan.workers.contains(where: { $0.parentId != nil }) {
+        // parent_id from architecture canvas AND from sub edges (so SUB plane is correct)
+        do {
             var db = PairState.loadPairsDb()
             var entry = db[session] as? [String: Any] ?? [:]
             var ws = Workers.list(from: entry)
+            var dirty = false
             for (i, w) in plan.workers.enumerated() {
                 let id = "w\(i + 1)"
-                if let idx = ws.firstIndex(where: { ($0["id"] as? String) == id }),
-                   let pid = w.parentId {
+                guard let idx = ws.firstIndex(where: { ($0["id"] as? String) == id }) else { continue }
+                if let pid = w.parentId, !pid.isEmpty {
                     ws[idx]["parent_id"] = pid
+                    dirty = true
                 }
             }
-            entry["workers"] = ws
-            db[session] = entry
-            Pong.writeJSON(PairState.pairsPath, db)
+            // Also honor sub edges: to-seat becomes sub under from-seat
+            for e in plan.flowEdges where e.kind == "sub" {
+                if let idx = ws.firstIndex(where: { ($0["id"] as? String) == e.to }) {
+                    ws[idx]["parent_id"] = e.from
+                    dirty = true
+                }
+            }
+            if dirty {
+                entry["workers"] = ws
+                entry["updated"] = Date().timeIntervalSince1970
+                db[session] = entry
+                Pong.writeJSON(PairState.pairsPath, db)
+                Pong.log("wizard parent_id applied session=\(session) workers=\(ws.map { "\($0["id"] ?? "?")->\($0["parent_id"] ?? "-")" })")
+            }
         }
         if plan.installGlobalSkills {
             TeamScaffold.installGlobalSkills()

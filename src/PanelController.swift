@@ -991,9 +991,23 @@ final class PanelController: NSObject, NSWindowDelegate {
                     session: session, nodeId: wid, multi: multi, map: posMap,
                     teamIndex: ti, role: "worker", workerIndex: i, canvas: size)
                 let accent = TerminalTheme.Colors.from(w["colors"])?.asNSColors.hi ?? PongTheme.magenta
-                // parent_id → subagent level in 3D
-                let parentId = (w["parent_id"] as? String) ?? (w["parent"] as? String)
-                let role3 = parentId != nil ? "subagent" : "worker"
+                // parent_id → subagent level in 3D (also treat empty string as nil)
+                let rawParent = (w["parent_id"] as? String) ?? (w["parent"] as? String)
+                let parentId = rawParent.flatMap { $0.isEmpty ? nil : $0 }
+                // Flow graph sub edges are a second source of truth if parent_id was lost
+                let isSubEdge: Bool = {
+                    guard parentId == nil else { return false }
+                    let edges = FlowGraph.load(from: entry)
+                    return edges.contains { $0.kind == "sub" && $0.to == wid }
+                }()
+                let role3 = (parentId != nil || isSubEdge) ? "subagent" : "worker"
+                let resolvedParent: String? = {
+                    if let parentId { return parentId }
+                    if isSubEdge {
+                        return FlowGraph.load(from: entry).first { $0.kind == "sub" && $0.to == wid }?.from
+                    }
+                    return nil
+                }()
                 models.append(AgentNodeModel(
                     session: session, id: wid, role: "worker",
                     title: lab, subtitle: "\(typ) · worker seat",
@@ -1007,7 +1021,7 @@ final class PanelController: NSObject, NSWindowDelegate {
                 seats3D.append(Seat3D(
                     session: session, id: wid, role: role3,
                     title: lab, subtitle: "\(typ) · \(MissionRole.parse(missionRole)?.title ?? "Agent")",
-                    detail: wdetail, status: status, parentId: parentId,
+                    detail: wdetail, status: status, parentId: resolvedParent,
                     openJobs: openN, flowHint: flowHint,
                     missionRole: missionRole,
                     ephemeral: isEphWorker
