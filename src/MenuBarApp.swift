@@ -614,10 +614,9 @@ enum Workers {
         let paneId = Isolation.registerPane(session: pair, workerId: id, tmuxTarget: "\(pair):\(actualIdx)", startCommand: launch)
         _ = seatExact
 
-        // Open Terminal attached to this window view (dedicated window — not a tab on Grok)
+        // Open Terminal attached to a single-seat view (not the full team group)
         let view = "\(pair)-w\(actualIdx - 1)"
-        Pong.sh("tmux has-session -t \(view) 2>/dev/null || tmux new-session -d -s \(view) -t \(pair)")
-        Pong.sh("tmux select-window -t \(view):\(actualIdx) 2>/dev/null || tmux select-window -t \(pair):\(actualIdx)")
+        Pairing.ensureSeatViewSession(view: view, base: pair, windowIndex: actualIdx)
         let newId = Pairing.openAttachSession(view, displayTitle: seatFriendly)
 
         let rec = makeWorker(
@@ -1892,6 +1891,72 @@ enum Pairing {
         return true
     }
 
+    /// Build a **single-window** view session that only shows one seat from the base team.
+    ///
+    /// Critical: `new-session -t base` joins the full session *group* — every Terminal client
+    /// can see every seat. Clicking status / next-window then makes the “Grok” window show
+    /// Claude while the OS title still says Grok. Instead we `link-window` only one pane.
+    static func ensureSeatViewSession(view: String, base: String, windowIndex: Int) {
+        let v = view.replacingOccurrences(of: "'", with: "")
+        let b = base.replacingOccurrences(of: "'", with: "")
+        let idx = max(0, windowIndex)
+        // Base must exist
+        let baseOK = Pong.sh("tmux has-session -t \(b) 2>/dev/null && echo yes || echo no")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard baseOK == "yes" else {
+            Pong.log("ensureSeatViewSession: base missing \(b)")
+            return
+        }
+        // Detect bad “full group” views (multiple windows) and recreate as single-link
+        let exists = Pong.sh("tmux has-session -t \(v) 2>/dev/null && echo yes || echo no")
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "yes"
+        if exists {
+            let winCount = Int(Pong.sh("tmux list-windows -t \(v) 2>/dev/null | wc -l")
+                .trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            // Also detect group membership (linked to base group = can see all seats)
+            let group = Pong.sh("tmux display-message -p -t \(v) '#{session_group}' 2>/dev/null")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if winCount > 1 || (!group.isEmpty && group == b) {
+                Pong.log("ensureSeatViewSession: recreating multi/group view \(v) wins=\(winCount) group=\(group)")
+                Pong.sh("tmux kill-session -t \(v) 2>/dev/null || true")
+            } else {
+                // Already a single-window private session — re-link source in case index moved
+                Pong.sh("tmux link-window -dk -s \(b):\(idx) -t \(v):0 2>/dev/null || true")
+                Pong.sh("tmux select-window -t \(v):0 2>/dev/null || true")
+                // Block window switching inside this client
+                lockViewToSingleWindow(v)
+                return
+            }
+        }
+        // Fresh private session with only the linked seat window
+        Pong.sh("tmux new-session -d -s \(v) -n seat 2>/dev/null || true")
+        // Replace default window with a hard link to base:index (only that seat)
+        Pong.sh("tmux link-window -dk -s \(b):\(idx) -t \(v):0 2>/dev/null || true")
+        // If link failed (index missing), fall back to group attach at that index
+        let linked = Int(Pong.sh("tmux list-windows -t \(v) 2>/dev/null | wc -l")
+            .trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        if linked == 0 {
+            Pong.log("ensureSeatViewSession: link failed, group fallback \(v) → \(b):\(idx)")
+            Pong.sh("tmux kill-session -t \(v) 2>/dev/null || true")
+            Pong.sh("tmux new-session -d -s \(v) -t \(b) 2>/dev/null || true")
+            Pong.sh("tmux select-window -t \(v):\(idx) 2>/dev/null || true")
+        } else {
+            Pong.sh("tmux select-window -t \(v):0 2>/dev/null || true")
+            lockViewToSingleWindow(v)
+        }
+        TmuxScroll.apply(session: v)
+        Pong.log("ensureSeatViewSession view=\(v) base=\(b):\(idx)")
+    }
+
+    /// Soft lock: single linked window already prevents seat-hopping; keep a simple status.
+    private static func lockViewToSingleWindow(_ view: String) {
+        let v = view.replacingOccurrences(of: "'", with: "")
+        Pong.sh("tmux set-option -t \(v) base-index 0 2>/dev/null || true")
+        // Hide the multi-window strip if anything extra sneaks in
+        Pong.sh("tmux set-option -t \(v) status-left '' 2>/dev/null || true")
+        Pong.sh("tmux set-option -t \(v) status-right '' 2>/dev/null || true")
+    }
+
     /// Open a **dedicated** Terminal window that attaches to `viewSession`.
     ///
     /// Critical: plain `do script` often opens as a *tab on the front Terminal*
@@ -2027,19 +2092,14 @@ enum Pairing {
             return nil
         }
 
-        // 3) Ensure a linked view session pointed at the right window
-        let viewOK = Pong.sh("tmux has-session -t \(view) 2>/dev/null && echo yes || echo no")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if viewOK != "yes" {
-            Pong.log("frontOrReopenAttach creating view session \(view) → \(pair)")
-            Pong.sh("tmux new-session -d -s \(view) -t \(pair) 2>/dev/null || true")
-        }
-        Pong.sh("tmux select-window -t \(view):\(tmuxIndex) 2>/dev/null || tmux select-window -t \(pair):\(tmuxIndex) 2>/dev/null || true")
+        // 3) Single-window view locked to this seat (never full group — that swapped Grok→Claude)
+        ensureSeatViewSession(view: view, base: pair, windowIndex: tmuxIndex)
         TmuxScroll.apply(session: pair)
         TmuxScroll.apply(session: view)
 
         // 4) New Terminal client — history is in tmux, not the closed window
-        return openAttachSession(view)
+        let title = TerminalTheme.friendlySeatTitle(pair: pair, seat: tmuxIndex == 0 ? "c1" : "w\(tmuxIndex)", seatLabel: nil)
+        return openAttachSession(view, displayTitle: title)
     }
 
     /// Stored window ids that still exist **and** are real attach clients for this pair.
@@ -2255,18 +2315,18 @@ enum Pairing {
             workerRecords.append(rec)
         }
 
-        Pong.sh("tmux new-session -d -s \(viewH) -t \(name)")
-        Pong.sh("tmux select-window -t \(viewH):0")
+        // One view session per seat, each with ONLY that window linked (not full group).
+        // Full-group views let a click on the Grok Terminal status bar switch into Claude.
+        ensureSeatViewSession(view: viewH, base: name, windowIndex: 0)
         var viewNames: [String] = []
         for idx in 0..<list.count {
             let vn = "\(name)-w\(idx)"
             viewNames.append(vn)
-            Pong.sh("tmux new-session -d -s \(vn) -t \(name)")
-            Pong.sh("tmux select-window -t \(vn):\(idx + 1)")
+            ensureSeatViewSession(view: vn, base: name, windowIndex: idx + 1)
         }
         if !viewNames.isEmpty {
-            Pong.sh("tmux has-session -t \(name)-c 2>/dev/null || tmux new-session -d -s \(name)-c -t \(name)")
-            Pong.sh("tmux select-window -t \(name)-c:1")
+            // Legacy -c alias for first worker only
+            ensureSeatViewSession(view: "\(name)-c", base: name, windowIndex: 1)
         }
 
         // Open Terminals one-by-one via .command launchers (never tab onto a free Grok window).
